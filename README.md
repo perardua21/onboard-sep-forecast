@@ -1,0 +1,119 @@
+# onboard-sep-forecast
+
+태양 양성자 사건(SEP) 조기경보 모델과, 그 성능을 공개 관측자료에서 사건 단위로
+재는 검증 파이프라인. 위성 탑재를 상정한 경량 모델이라 파라미터와 연산량에
+상한을 두고 설계했다.
+
+모델은 최근 60분의 다중 센서 시계열을 읽고, **30분 및 60분 안에 ≥10 MeV 양성자
+플럭스가 10 pfu(NOAA S1)에 도달할 확률**을 낸다.
+
+## 설치와 실행
+
+```bash
+pip install -r requirements.txt
+python run_tests.py
+```
+
+자료를 받기 전에 파이프라인만 확인하려면:
+
+```bash
+python scripts/run_all.py --synthetic --model logreg
+```
+
+실제 자료로 돌리려면 내려받기부터 한다.
+
+```bash
+python scripts/fetch_data.py --probe        # 이틀치 + 변수 목록
+python scripts/fetch_data.py --all          # 전 구간 (수 시간)
+python scripts/run_all.py --ingest data/raw
+python scripts/run_all.py --model tcn --event 2017-09-10
+```
+
+설정은 `configs/locked.yaml`. 각 값이 무엇을 뜻하는지는 `docs/spec.md` 에 있다.
+
+## 모델
+
+| | |
+|---|---|
+| 입력 | 17채널 × 60분 (X선 2, 전자 5, 양성자 8, 선량률 2) |
+| 출력 | 30분·60분 내 10 pfu 초과 확률 |
+| 백본 | 1D CNN / TCN + sigmoid |
+| 파라미터 | 68,690 (상한 150,000) |
+| 연산량 | 20 MFLOPs/추론 예산 |
+
+연산 예산이 입력 길이를 정한다. 60분 창을 1초 격자(3,600점)로 넣으면 예산을
+한참 넘기므로, 25초 간격 145점으로 재표본해서 넣는다. 역산은
+`models.tcn_budget()` 에 있다.
+
+양성자 채널은 **과거값만** 입력으로 쓴다. 라벨은 `t` 이후 구간에서 만들고,
+사건이 진행 중인 구간은 학습과 평가에서 모두 뺀다. 이미 벌어진 일을 맞히는
+것은 예측이 아니다.
+
+## 평가
+
+사건 수가 적고 양성 비율이 0.1% 수준이라 표본 단위 정확도는 쓸모가 없다.
+아무 예보도 하지 않아도 99%를 넘기 때문이다. 그래서 경보를 묶음으로 만든 뒤
+사건 단위로 센다.
+
+- 탐지율, 오경보비, CSI
+- Brier 점수와 신뢰도 도표
+- 선행시간의 평균·중앙값·하위 10백분위
+- 95% 신뢰구간 (사건 블록 또는 기간 블록 복원추출)
+
+신뢰구간을 블록 단위로 뽑는 이유는 이웃한 시각의 값이 서로 강하게 묶여 있어서다.
+점 단위로 뽑으면 구간이 실제보다 좁게 나온다.
+
+비교군은 지속성, 단순 임계값(X선/전자/양성자 각각), 2종 동의 규칙 게이트,
+로지스틱 회귀, 경량 신경망이다. 제거 실험으로 채널 집합별 기여도를 본다.
+
+### 기내 판정과 사용자 수신을 나눈다
+
+판정이 빨라도 전달되지 않으면 경보가 없는 것과 같다. 저궤도 위성에서 지상
+수신점이 보이는 시간은 한 바퀴 117.8분 중 12.43분뿐이다. `delivery.py` 가
+궤도 위상을 균등 추첨해서 수신 선행시간의 분포를 내고, 수신이 사건 도달보다
+늦은 경우를 따로 센다.
+
+## 알려진 한계
+
+- GOES-16 SGPS 양성자 자료는 2020년부터다. 학습 구간은 구세대 EPEAD 를 쓰게
+  되므로 학습과 시험의 관측 기기가 다르다. 성능 차이에 기기 차이가 섞인다.
+- EPEAD 는 >100 MeV 까지라 구세대 구간에서 `p_gt500` 이 결측이다.
+- 선량률 2채널은 지상 자료로 채울 수 없다. 0 으로 두되 유무 플래그로 표시한다.
+- 지상 재현은 5분 격자다. 10초 추론보다 선행시간이 한 격자만큼 짧게 나온다.
+- 합성 자료는 선행 신호를 규칙적으로 심어 둔 것이라 성능이 실제보다 훨씬 좋게
+  나온다. 어떤 표에도 넣지 않는다.
+
+## 구조
+
+```
+configs/locked.yaml     검증 설정
+docs/spec.md            각 수치의 근거
+docs/data_sources.md    무엇을 어디서 받는가
+docs/data_dictionary.md 원본 변수명 → 공통 스키마
+src/oracle/
+  channels.py           채널 정의, 제거 실험용 채널 집합
+  labeling.py           사건 탐지, 이중 horizon 라벨
+  features.py           로그, 배경 대비 비율, 상승률
+  datasets.py           창 생성, 시간순 분할, 표준화
+  models.py             TCN, 로지스틱 회귀, 연산 예산 산식
+  train.py              학습과 임계값 선택
+  baselines.py          규칙 게이트와 단순 임계값
+  predict.py            확률 → 경보
+  evaluate.py           사건 단위 지표
+  delivery.py           수신 선행시간
+  experiments.py        표 생성
+  ingest.py             원본 적재
+  plots.py              그림
+scripts/fetch_data.py   공개 아카이브 내려받기
+tools/pytest_shim/      pytest 없는 환경용 대역
+```
+
+## 참고
+
+- NOAA Space Weather Scales (S등급 정의)
+- SEP Scoreboard / SPHINX 검증 틀 — 사건 시작·종료 정의와 표준 임계값
+- Núñez & Paul-Peña (2018), *J. Space Weather Space Clim.* 8, A36 —
+  X선과 준상대론적 전자를 쓴 예보 성능
+- Posner (2007), *Space Weather* 5, S05001 — 전자 선행 신호 기반 예보
+
+자료 출처는 `docs/data_sources.md` 참조.

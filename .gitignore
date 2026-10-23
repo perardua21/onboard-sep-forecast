@@ -1,0 +1,25 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+.ipynb_checkpoints/
+.pytest_cache/
+.DS_Store
+
+# 자료와 산출물은 커밋하지 않는다. 스크립트로 다시 만든다.
+data/raw/*
+data/interim/*
+data/processed/*
+!data/**/.gitkeep
+outputs/models/*
+outputs/metrics/*
+outputs/figures/*
+!outputs/**/.gitkeep
+
+docs/variable_inventory.txt
+
+# 문서 원본은 저장소에 두지 않는다
+*.docx
+*.pptx
+*.hwp

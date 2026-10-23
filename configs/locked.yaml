@@ -1,0 +1,103 @@
+# 검증 설정. 각 값의 근거는 docs/spec.md 에 있다.
+#
+# 시험집합을 한 번 돌린 뒤에는 이 파일을 고치지 않는다. 고쳐야 하면
+# git 이력에 남기고 재실행 사실을 docs/experiment_log.md 에 적는다.
+
+data:
+  path: data/processed/sep_5min.parquet
+  cadence_min: 5                  # GOES 적분 양성자 공개 간격
+
+event:
+  threshold_pfu: 10.0             # NOAA S1
+  sustain_points: 3               # 연속 3점. 분이 아니라 점 수로 둔다
+  end_threshold_pfu: 5.0
+  end_hours: 3.0
+  merge_hours: 0.0                # 종료 규칙이 분리를 결정. 카탈로그 대조 시에만 24
+
+label:
+  horizons_min: [30, 60]
+  primary_horizon_min: 30         # 경보 판정에 쓰는 쪽
+  window_min: 60
+  exclude_ongoing: true
+
+features:
+  background_min: 60              # 배경 중앙값 창. 전자 ×10 조건과 같은 창을 쓴다
+  rise_min: [10, 30]
+  nn_derive:   [log, ratio]       # 상승률은 팽창 합성곱이 직접 배운다
+  flat_derive: [log, ratio, rise] # 창을 접는 모델에는 미리 준다
+
+channels:
+  set: fused17                    # fused17 | no_dose | no_proton | xray_only | electron_only
+
+split:                            # 시간순. 섞지 않는다
+  train_start: "2010-01-01"
+  train_end:   "2019-12-31"
+  valid_end:   "2022-12-31"
+  test_end:    "2026-10-22"
+
+model:
+  kind: tcn                       # tcn | cnn1d | logreg | gbt
+  channels_hidden: 48             # 파라미터 68,690
+  onboard_resample_s: 25          # 20 MFLOPs 예산 역산값. 60분 창 -> 145점
+  n_blocks: 3
+  kernel_size: 5
+  dropout: 0.2
+  lr: 0.002
+  weight_decay: 0.0001
+  epochs: 20
+  batch_size: 256
+  stride_min: 15
+  seed: 20170910
+  param_budget: [50000, 150000]
+  flops_budget_m: 20
+
+augment:
+  # 궤도상 X선 결손을 미리 학습시킨다. 임계값이 아니라 입력만 가린다.
+  eclipse_mask_prob: 0.394        # 46.5 / 117.8
+  eclipse_block_min: 46.5
+
+gate:                             # 초기 탐색값. 검증집합에서 잠근다
+  xray_m1_wm2: 1.0e-5
+  xray_sustain_min: 2
+  electron_ratio: 10.0
+  electron_background_min: 60
+  electron_sustain_min: 5
+  proton_pfu: 1.0
+  proton_sustain_min: 3
+  model_prob: 0.7
+  model_persist_points: 2
+  two_of_n: true
+  agree_window_min: 60            # 동시가 아니라 최근 60분 안에 둘 다.
+                                  # X선 57분, 전자 45분 선행이라 동시성은 성립하지 않는다
+
+inference:
+  cadence_s: 10
+  also_report_s: 1                # 둘 다 산출해 비교
+  beacon_period_s: 10
+  beacon_bytes: 32
+  beacon_valid_s: 60
+
+alarm:
+  cluster_gap_hours: 3.0          # 연속 경보를 한 건으로 묶는 간격
+  grace_hours: 2.0                # 묶음 끝 이후 onset 연결 유예
+  target_far: 0.35
+  target_far_with_ground: 0.25    # 지상 CME 정보를 받을 수 있는 구간
+  target_pod: 0.70
+  target_pod_min: 0.50
+  target_pod_ext: 0.80
+  target_lead_min: 30.0
+
+delivery:
+  orbit_period_min: 117.8
+  visible_min: 12.43              # 최소 고도각 0°
+  n_phase_samples: 2000           # 궤도 위상을 알 수 없으므로 몬테카를로
+  n_satellites: 1
+
+uncertainty:
+  bootstrap_n: 2000
+  block: event                    # event | period
+  block_days: 30
+  z: 1.96
+
+outputs:
+  dir: outputs
