@@ -66,6 +66,38 @@ def eclipse_augment(df: pd.DataFrame, cfg, rng: np.random.Generator) -> pd.DataF
     return mask_xray(df, mask, cad)
 
 
+def harmonize(df_raw: pd.DataFrame, channels: list, masks: dict,
+              min_frac: float = 0.8, verbose: bool = True) -> tuple[list, dict]:
+    """학습·시험 구간 모두에서 충분히 관측된 채널만 남긴다.
+
+    GOES 는 세대마다 채널 구성이 다르다. 구세대에는 >500 MeV 양성자가 없고
+    신세대에는 >0.8 MeV·>4 MeV 전자가 없다. 한쪽 구간에서만 있는 채널을
+    입력에 두면, 학습 때 상수였던 값이 시험 때 갑자기 실제 값이 되어
+    모델이 본 적 없는 입력을 받는다.
+    """
+    from .channels import XRAY_FLAG
+    report, keep = {}, []
+    for c in channels:
+        if c == XRAY_FLAG or c.endswith("_ok"):
+            continue
+        avail = {k: (float(df_raw.loc[m, c].notna().mean()) if c in df_raw.columns and m.any()
+                     else 0.0) for k, m in masks.items()}
+        report[c] = avail
+        if min(avail.values()) >= min_frac:
+            keep.append(c)
+    flags = [f for f in channels if f == XRAY_FLAG
+             or (f.endswith("_ok") and f[:-3] in keep)]
+    dropped = [c for c in report if c not in keep]
+    if verbose and dropped:
+        print(f"  구간별 관측률 {min_frac:.0%} 미만이라 뺀 채널 {len(dropped)}개:")
+        for c in dropped:
+            a = report[c]
+            print(f"    {c:10s} " + "  ".join(f"{k} {v:.0%}" for k, v in a.items()))
+    if not keep:
+        raise SystemExit("남는 입력 채널이 없다. 자료 범위와 채널 매핑을 확인할 것")
+    return keep + flags, report
+
+
 def channels_for(cfg) -> list:
     return model_input(cfg.get("channels.set", "fused17"))
 
@@ -104,6 +136,7 @@ def _features(df, cfg, channels, kind: str = "tcn"):
 
 def train(df: pd.DataFrame, cfg, channels=None, kind: str | None = None,
           verbose: bool = True) -> Trained:
+    df_raw = df
     df = fill_missing(df.copy())
     channels = list(channels or channels_for(cfg))
     kind = kind or cfg.get("model.kind", "tcn")
@@ -114,6 +147,11 @@ def train(df: pd.DataFrame, cfg, channels=None, kind: str | None = None,
     rng = np.random.default_rng(seed)
 
     events, Y, horizons, ong, (tr, va, te), cad = prepare(df, cfg)
+    avail = {}
+    if cfg.get("channels.harmonize", True):
+        masks = {"학습": tr, "시험": te} if te.any() else {"학습": tr}
+        channels, avail = harmonize(df_raw, channels, masks,
+                                    float(cfg.get("channels.min_available", 0.8)), verbose)
     stride = max(1, int(cfg.get("model.stride_min", 15)) // cad)
     win = int(cfg.get("label.window_min", 60))
     y0 = Y[horizons[0]]
@@ -128,7 +166,7 @@ def train(df: pd.DataFrame, cfg, channels=None, kind: str | None = None,
     if kind in FLAT_KINDS:
         F = _features(df, cfg, channels, kind)
         S = window_summary(F, win, cad)
-        ok = S.notna().all(axis=1).to_numpy() & ~ong
+        ok = (S.notna().mean(axis=1) >= 0.8).to_numpy() & ~ong
         Xtr = S[ok & tr].to_numpy()[::stride]
         clf = {}
         for h in horizons:
@@ -139,8 +177,8 @@ def train(df: pd.DataFrame, cfg, channels=None, kind: str | None = None,
         info = {"kind": kind, "n_features": int(S.shape[1])}
     else:
         df_aug = eclipse_augment(df, cfg, rng)
-        Fa = _features(df_aug, cfg, channels, kind).fillna(0.0)
-        F = _features(df, cfg, channels, kind).fillna(0.0)
+        Fa = _features(df_aug, cfg, channels, kind)
+        F = _features(df, cfg, channels, kind)
         Xa, idx = make_windows(Fa, win, cad, 1)
         X, _ = make_windows(F, win, cad, 1)
         pos = df.index.searchsorted(idx)
@@ -169,37 +207,46 @@ def train(df: pd.DataFrame, cfg, channels=None, kind: str | None = None,
                   f"충족 {info['파라미터 충족']}) · 기내 창 재표본 "
                   f"{info['기내 창 재표본 간격']}")
 
-    # 임계값은 검증집합에서만 고른다
-    th = {}
+    # 임계값은 검증집합에서, 보고와 같은 사건 단위 지표로 고른다
+    from .evaluate import select_threshold
+    th, th_info = {}, {}
     target = float(cfg.get("alarm.target_far", 0.35))
+    persist = int(cfg.get("gate.model_persist_points", 2))
+    pick_mask, where = va, "검증"
+    ev_pick = [e for e in events if pick_mask[df.index.searchsorted(e[0])]]
+    if not ev_pick:
+        pick_mask, where = tr, "학습"
+        ev_pick = [e for e in events if tr[df.index.searchsorted(e[0])]]
+        if verbose:
+            print("  ! 검증 구간에 사건이 없어 학습 구간에서 임계값을 고른다")
     for h in horizons:
-        sel = va & ~ong & np.isfinite(prob[h])
-        if not sel.any():
-            sel = tr & ~ong & np.isfinite(prob[h])
-        th[h] = models.pick_threshold(prob[h][sel], Y[h][sel], target)
+        th[h], th_info[h] = select_threshold(
+            prob[h], df.index, ev_pick, pick_mask & ~ong, target,
+            persist_points=persist, horizon_min=h, verbose=verbose)
     if verbose:
-        print("  임계값(검증집합에서 선택): "
+        print(f"  임계값({where}집합, 사건 {len(ev_pick)}건): "
               + ", ".join(f"{h}분 {th[h]:.3f}" for h in horizons))
 
     return Trained(kind, clf, scaler, th, horizons, events, ong,
                    df.index, (tr, va, te), prob,
-                   {**info, "labels": Y, "split_report": split_report(df.index, tr, va, te)})
+                   {**info, "labels": Y, "split_report": split_report(df.index, tr, va, te),
+                    "channels": channels, "availability": avail, "threshold_info": th_info})
 
 
 def infer(t: Trained, df: pd.DataFrame, cfg, channels=None) -> dict:
     """학습된 모델로 다른(예: 결손 모사) 자료에 추론한다. {horizon: prob}"""
     df = fill_missing(df.copy())
-    channels = list(channels or channels_for(cfg))
+    channels = list(channels or t.info.get("channels") or channels_for(cfg))
     cad, win = cfg.cadence, int(cfg.get("label.window_min", 60))
     F = _features(df, cfg, channels, t.kind)
     out = {h: np.full(len(df), np.nan, np.float32) for h in t.horizons}
     if t.kind in FLAT_KINDS:
         S = window_summary(F, win, cad)
-        ok = S.notna().all(axis=1).to_numpy()
+        ok = (S.notna().mean(axis=1) >= 0.8).to_numpy()
         for h in t.horizons:
             out[h][ok] = models.predict_proba(t.model[h], S[ok].to_numpy())
     else:
-        X, idx = make_windows(F.fillna(0.0), win, cad, 1)
+        X, idx = make_windows(F, win, cad, 1)
         P = models.predict_nn(t.model, t.scaler.transform(X))
         pos = df.index.searchsorted(idx)
         for j, h in enumerate(t.horizons):

@@ -32,10 +32,9 @@ def detect_events(p10: pd.Series,
     if n < sustain_points:
         return []
 
+    v = s.to_numpy()
     hi = (s >= threshold_pfu).fillna(False).to_numpy()
-    lo = (s < end_threshold_pfu).fillna(False).to_numpy()
-    cad_min = (idx[1] - idx[0]).total_seconds() / 60.0 if n > 1 else 1.0
-    end_pts = max(1, int(round(end_hours * 60.0 / cad_min)))
+    end_td = pd.Timedelta(hours=end_hours)
 
     events = []
     i = 0
@@ -45,15 +44,25 @@ def detect_events(p10: pd.Series,
             continue
         onset = idx[i]
 
-        # 종료: end_threshold 미만이 end_pts 연속
+        # 종료: end_threshold 미만이 end_hours 동안 이어짐.
+        # 결측은 미달 구간을 끊지도 늘리지도 않는다. 결측 30분에 종료가
+        # 몇 시간씩 밀리면 그 뒤 구간이 통째로 평가에서 빠진다.
         j = i + sustain_points
-        run = 0
+        run_start = None
         end_at = idx[-1]
         while j < n:
-            run = run + 1 if lo[j] else 0
-            if run >= end_pts:
-                end_at = idx[j - end_pts + 1]      # 미달 구간이 시작된 시각
-                break
+            x = v[j]
+            if x != x:                      # NaN
+                j += 1
+                continue
+            if x < end_threshold_pfu:
+                if run_start is None:
+                    run_start = idx[j]
+                if idx[j] - run_start >= end_td - (idx[1] - idx[0]):
+                    end_at = run_start      # 미달 구간이 시작된 시각
+                    break
+            else:
+                run_start = None
             j += 1
         events.append((onset, end_at))
         i = j + 1

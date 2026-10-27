@@ -22,25 +22,6 @@ except Exception:                                      # noqa: BLE001
 
 
 # ───────────────────────────────────────── 임계값
-def pick_threshold(prob: np.ndarray, y: np.ndarray,
-                   target_far: float | None = 0.35, grid: int = 201) -> float:
-    """validation 에서만 고른다. 잠금 시험집합에서 고치면 그 자체가 누설이다 ."""
-    ok = np.isfinite(prob)
-    prob, y = prob[ok], y[ok]
-    best, best_key = 0.5, -np.inf
-    for th in np.linspace(0.01, 0.99, grid):
-        pred = prob >= th
-        tp = np.sum(pred & (y == 1)); fp = np.sum(pred & (y == 0))
-        fn = np.sum(~pred & (y == 1)); tn = np.sum(~pred & (y == 0))
-        pod = tp / (tp + fn) if tp + fn else 0.0
-        pofd = fp / (fp + tn) if fp + tn else 0.0
-        far = fp / (tp + fp) if tp + fp else 1.0
-        key = (pod - pofd) if target_far is None else (pod if far <= target_far else -np.inf)
-        if key > best_key:
-            best_key, best = key, float(th)
-    return best
-
-
 # ───────────────────────────────────────── 로지스틱 회귀
 def fit_logreg(X, y, seed: int = 0, C: float = 1.0):
     """선형 기준선. 신경망이 선형보다 나은지를 같은 자료로 확인한다."""
@@ -76,8 +57,8 @@ predict_gbt = predict_proba
 
 
 # ───────────────────────────────────────── 연산 예산
-def tcn_budget(n_feat: int, hidden: int = 48, n_blocks: int = 3,
-               kernel_size: int = 5, n_heads: int = 2,
+def tcn_budget(n_feat: int, hidden: int = 32, n_blocks: int = 4,
+               kernel_size: int = 7, n_heads: int = 2,
                window_steps: int = 12, flops_budget_m: float = 20.0) -> dict:
     """torch 없이 파라미터·연산량을 센다. 설계 기준 수치를 검산할 때 쓴다.
 
@@ -95,8 +76,18 @@ def tcn_budget(n_feat: int, hidden: int = 48, n_blocks: int = 3,
     conv_p = p - (hidden * n_heads + n_heads)
     flops = 2 * conv_p * window_steps + 2 * hidden * n_heads
     t_max = int(flops_budget_m * 1e6 // (2 * conv_p)) if conv_p else 0
+    rf = receptive_field(n_blocks, kernel_size)
     return {"params": p, "flops": flops, "flops_m": flops / 1e6,
-            "onboard_max_steps": t_max}
+            "onboard_max_steps": t_max, "receptive_field": rf,
+            "covers_window": rf >= window_steps}
+
+
+def receptive_field(n_blocks: int, kernel_size: int) -> int:
+    """팽창 1, 2, 4, ... 인 블록마다 합성곱 2개. 마지막 시점이 보는 과거 길이(점).
+
+    이게 입력 길이보다 짧으면 창 앞부분은 모델에 닿지 않는다.
+    """
+    return 1 + 2 * (kernel_size - 1) * (2 ** n_blocks - 1)
 
 
 def onboard_steps_for_budget(n_params: int, flops_budget_m: float = 20.0) -> int:
@@ -143,8 +134,8 @@ if HAS_TORCH:
     class ModelA(nn.Module):
         """TCN 백본 + 출력부 2개 (30분, 60분). 설계 기준."""
 
-        def __init__(self, n_feat: int, hidden: int = 48, n_blocks: int = 3,
-                     kernel_size: int = 5, dropout: float = 0.2,
+        def __init__(self, n_feat: int, hidden: int = 32, n_blocks: int = 4,
+                     kernel_size: int = 7, dropout: float = 0.2,
                      n_heads: int = 2, dilated: bool = True):
             super().__init__()
             blocks, c = [], n_feat
@@ -164,9 +155,9 @@ if HAS_TORCH:
         g = (lambda k, d: cfg.get(k, d)) if cfg is not None else (lambda k, d: d)
         return ModelA(
             n_feat,
-            hidden=int(g("model.channels_hidden", 48)),
-            n_blocks=int(g("model.n_blocks", 3)),
-            kernel_size=int(g("model.kernel_size", 5)),
+            hidden=int(g("model.channels_hidden", 32)),
+            n_blocks=int(g("model.n_blocks", 4)),
+            kernel_size=int(g("model.kernel_size", 7)),
             dropout=float(g("model.dropout", 0.2)),
             n_heads=n_heads,
             dilated=(kind != "cnn1d"))

@@ -51,14 +51,16 @@ def _test_events(events, cfg):
     return out
 
 
-def _metrics(alarm, events, ong, index, cfg, te_mask, min_lead=0.0):
+def _metrics(alarm, events, ong, index, cfg, te_mask, min_lead=0.0, horizon_min=None):
+    """묶음 간격과 유예를 예측 범위에 맞춘다 (evaluate.event_metrics 설명 참조)."""
+    h = float(horizon_min or cfg.get("label.primary_horizon_min", 30)) / 60.0
     return event_metrics(
         alarm.where(pd.Series(te_mask, index=index), False),
         _test_events(events, cfg),
-        grace_hours=float(cfg.get("alarm.grace_hours", 2.0)),
+        grace_hours=h,
         min_lead_min=float(min_lead),
         valid_mask=pd.Series(~ong, index=index),
-        cluster_gap_hours=float(cfg.get("alarm.cluster_gap_hours", 3.0)))
+        cluster_gap_hours=h)
 
 
 def _model_alarm(prob, index, th, cfg):
@@ -99,7 +101,7 @@ def run_all(df: pd.DataFrame, cfg, out_dir: Path, kind: str | None = None,
     met.mkdir(parents=True, exist_ok=True)
     fig.mkdir(parents=True, exist_ok=True)
     cad = cfg.cadence
-    gate = cfg.get("gate", {}) or {}
+    gate = dict(cfg.get("gate", {}) or {})
     target_lead = float(cfg.get("alarm.target_lead_min", 30.0))
 
     t = train(df, cfg, kind=kind)
@@ -107,6 +109,14 @@ def run_all(df: pd.DataFrame, cfg, out_dir: Path, kind: str | None = None,
     events, ong, index = t.events, t.ongoing, t.index
     Y = t.info["labels"]
     H = t.primary
+
+    gate["electron_channel"] = baselines.pick_electron_channel(
+        df, {"학습": tr, "시험": te} if te.any() else {"학습": tr},
+        min_frac=float(cfg.get("channels.min_available", 0.8)))
+    print(f"전자 게이트 채널: {gate['electron_channel']}")
+    used = t.info.get("channels", [])
+    print(f"모델 입력 채널 {len([c for c in used if not c.endswith('_ok') and c != 'xray_ok'])}개: "
+          + ", ".join(c for c in used if not c.endswith("_ok") and c != "xray_ok"))
 
     ev = events_to_frame(events)
     _save(ev, met / "event_table.csv")
@@ -123,7 +133,12 @@ def run_all(df: pd.DataFrame, cfg, out_dir: Path, kind: str | None = None,
     for key in ("persistence", "xray_only", "electron_only", "proton_rise",
                 "rule_gate", "s1_reached"):
         fn = baselines.REGISTRY[key]
-        a = fn(df, cadence=cad, gate=gate) if key.startswith("rule") else fn(df, cadence=cad)
+        if key.startswith("rule"):
+            a = fn(df, cadence=cad, gate=gate)
+        elif key == "electron_only":
+            a = fn(df, cadence=cad, channel=gate["electron_channel"])
+        else:
+            a = fn(df, cadence=cad)
         m = _metrics(a, events, ong, index, cfg, te)
         rows.append(fmt_row(baselines.LABELS[key], m, EXP_DOC["EXP-02"]
                             if "only" in key or "rise" in key else ""))
@@ -158,8 +173,10 @@ def run_all(df: pd.DataFrame, cfg, out_dir: Path, kind: str | None = None,
                 train(df, cfg, channels=model_input(name), kind=kind, verbose=False)
             aa = _model_alarm(tt.prob[tt.primary], index, tt.threshold, cfg)
             mm = _metrics(aa, events, ong, index, cfg, te)
-            rows2.append(fmt_row(f"{name} ({len(CHANNEL_SETS[name])}채널)", mm,
-                                 EXP_DOC["EXP-06"]))
+            used = [c for c in tt.info.get("channels", [])
+                    if not c.endswith("_ok") and c != "xray_ok"]
+            rows2.append(fmt_row(f"{name} ({len(used)}/{len(CHANNEL_SETS[name])}채널)", mm,
+                                 "실제 사용: " + ", ".join(used)))
         except Exception as e:                               # noqa: BLE001
             print(f"  제거 실험 {name} 생략: {e}")
     if rows2:
@@ -170,7 +187,7 @@ def run_all(df: pd.DataFrame, cfg, out_dir: Path, kind: str | None = None,
     rows3 = []
     for h in t.horizons:
         a = _model_alarm(t.prob[h], index, t.thresholds[h], cfg)
-        m = _metrics(a, events, ong, index, cfg, te)
+        m = _metrics(a, events, ong, index, cfg, te, horizon_min=h)
         rows3.append(fmt_row(f"{h}분 출력", m, f"임계값 {t.thresholds[h]:.3f}"))
     out["t3_horizon"] = _show("표 3  예측 범위", rows3).to_dict("records")
     _save(pd.DataFrame(rows3), met / "t3_horizon.csv")
@@ -242,18 +259,21 @@ def run_all(df: pd.DataFrame, cfg, out_dir: Path, kind: str | None = None,
     n_ch = len(CHANNEL_SETS[cfg.get("channels.set", "fused17")])
     n_feat = n_ch * len(cfg.get("features.nn_derive", ["log", "ratio"])) + 3
     tb = tcn_budget(n_feat,
-                    hidden=int(cfg.get("model.channels_hidden", 48)),
-                    n_blocks=int(cfg.get("model.n_blocks", 3)),
-                    kernel_size=int(cfg.get("model.kernel_size", 5)),
+                    hidden=int(cfg.get("model.channels_hidden", 32)),
+                    n_blocks=int(cfg.get("model.n_blocks", 4)),
+                    kernel_size=int(cfg.get("model.kernel_size", 7)),
                     n_heads=len(t.horizons),
-                    window_steps=max(2, int(cfg.get("label.window_min", 60)) // cad),
+                    window_steps=int(int(cfg.get("label.window_min", 60)) * 60
+                                     // int(cfg.get("model.onboard_resample_s", 25))),
                     flops_budget_m=float(cfg.get("model.flops_budget_m", 20)))
     lo, hi = cfg.get("model.param_budget", [50000, 150000])
     rows7 += [
         {"항목": "비행 모델 입력 특징 수", "값": f"{n_feat} ({n_ch}채널 × 파생 + 플래그 3)"},
         {"항목": "비행 모델 파라미터", "값": f"{tb['params']:,}  (예산 {lo:,}~{hi:,}, "
                                    f"{'충족' if lo <= tb['params'] <= hi else '미충족'})"},
-        {"항목": "지상 재현 연산량", "값": f"{tb['flops_m']:.2f} MFLOPs / 추론"},
+        {"항목": "기내 연산량 (재표본 창)", "값": f"{tb['flops_m']:.1f} MFLOPs / 추론"},
+        {"항목": "수용영역", "값": f"{tb['receptive_field']}점 "
+                                f"({'창 전체' if tb['covers_window'] else '창 일부만'})"},
         {"항목": "기내 입력 길이 상한", "값": f"{tb['onboard_max_steps']}점"},
         {"항목": "기내 60분 창 재표본 간격",
          "값": f"{int(cfg.get('label.window_min', 60))*60/max(tb['onboard_max_steps'],1):.1f} s"},
@@ -322,7 +342,7 @@ def run_horizons(df: pd.DataFrame, cfg, out_dir: Path,
         cfg.raw["label"]["primary_horizon_min"] = int(h)
         t = train(df, cfg, kind=kind, verbose=False)
         a = _model_alarm(t.prob[h], t.index, t.threshold, cfg)
-        m = _metrics(a, t.events, t.ongoing, t.index, cfg, t.splits[2])
+        m = _metrics(a, t.events, t.ongoing, t.index, cfg, t.splits[2], horizon_min=h)
         rows.append(fmt_row(f"{h}분", m, f"임계값 {t.threshold:.3f}"))
     df_out = _show("예측 범위 sweep", rows)
     _save(df_out, out_dir / "metrics" / "horizons.csv")

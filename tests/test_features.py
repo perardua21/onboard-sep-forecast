@@ -84,19 +84,24 @@ def test_window_summary_column_count():
     assert (S.dtypes == "float32").all()
 
 
-def test_nn_feature_count_keeps_params_in_budget():
-    """설계 기준: 파라미터 5~15만, 20 MFLOPs/추론.
+def test_flight_model_fits_budget_and_sees_whole_window():
+    """파라미터 5~15만, 20 MFLOPs, 그리고 60분 창 전체를 본다.
 
-    torch 없이도 검산되도록 순수 산식(tcn_budget)으로 확인한다.
+    예전 설정(48폭·3블록·커널5)은 앞의 두 조건은 맞았지만 수용영역이
+    57점(25초 간격이면 24분)이라 창의 60%를 버렸다. 세 조건을 같이 본다.
     """
+    from oracle.config import load_config
     from oracle.models import tcn_budget
-    F = build_features(_df(), channels=model_input("fused17"),
-                       derive=("log", "ratio"))
+    from pathlib import Path
+    cfg = load_config(Path(__file__).resolve().parents[1] / "configs" / "locked.yaml")
+    F = build_features(_df(), channels=model_input("fused17"), derive=("log", "ratio"))
     n_feat = F.shape[1]
-    assert n_feat == 17 * 2 + 3            # 17채널 × (log, ratio) + 플래그 3
+    assert n_feat == 17 * 2 + 3
 
-    b = tcn_budget(n_feat, hidden=48, n_blocks=3, kernel_size=5,
-                   n_heads=2, window_steps=12)
-    assert 50_000 <= b["params"] <= 150_000
-    assert b["flops_m"] <= 20.0
-    assert b["onboard_max_steps"] >= 60     # 60분 창을 1분 간격 이상으로는 넣을 수 있다
+    steps = cfg.get("label.window_min") * 60 // cfg.get("model.onboard_resample_s")
+    b = tcn_budget(n_feat, cfg.get("model.channels_hidden"), cfg.get("model.n_blocks"),
+                   cfg.get("model.kernel_size"), 2, steps)
+    lo, hi = cfg.get("model.param_budget")
+    assert lo <= b["params"] <= hi
+    assert b["flops_m"] <= cfg.get("model.flops_budget_m")
+    assert b["covers_window"], f"수용영역 {b['receptive_field']} < 창 {steps}"

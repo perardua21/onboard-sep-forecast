@@ -28,6 +28,8 @@ features:
 
 channels:
   set: fused17                    # fused17 | no_dose | no_proton | xray_only | electron_only
+  harmonize: true                 # 학습·시험 구간 모두 관측률이 충분한 채널만 쓴다
+  min_available: 0.8              # GOES 세대마다 채널이 달라서 필요하다
 
 split:                            # 시간순. 섞지 않는다
   train_start: "2010-01-01"
@@ -37,10 +39,10 @@ split:                            # 시간순. 섞지 않는다
 
 model:
   kind: tcn                       # tcn | cnn1d | logreg | gbt
-  channels_hidden: 48             # 파라미터 68,690
-  onboard_resample_s: 25          # 20 MFLOPs 예산 역산값. 60분 창 -> 145점
-  n_blocks: 3
-  kernel_size: 5
+  channels_hidden: 32             # 파라미터 60,002
+  onboard_resample_s: 25          # 60분 창 -> 145점, 17.4 MFLOPs
+  n_blocks: 4                     # 수용영역 181점. 145점 창 전체를 본다
+  kernel_size: 7
   dropout: 0.2
   lr: 0.002
   weight_decay: 0.0001
@@ -78,8 +80,8 @@ inference:
   beacon_valid_s: 60
 
 alarm:
-  cluster_gap_hours: 3.0          # 연속 경보를 한 건으로 묶는 간격
-  grace_hours: 2.0                # 묶음 끝 이후 onset 연결 유예
+  # 경보 묶음 간격과 유예는 따로 두지 않고 예측 범위(30분/60분)와 같게 쓴다.
+  # 경보는 "H분 안에 사건"이라는 주장이라, H분 넘게 끊기면 앞선 주장은 끝난 것이다.
   target_far: 0.35
   target_far_with_ground: 0.25    # 지상 CME 정보를 받을 수 있는 구간
   target_pod: 0.70

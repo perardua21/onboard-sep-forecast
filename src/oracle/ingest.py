@@ -226,19 +226,38 @@ def read_sgps_nc(path: Path) -> pd.DataFrame | None:
         return out if len(out.columns) else None
 
 
+_DATE_IN_NAME = re.compile(r"_d(\d{8})")
+
+
+def _check_dates(path: Path, d: pd.DataFrame | None) -> pd.DataFrame | None:
+    if d is None or d.empty:
+        return d
+    m = _DATE_IN_NAME.search(Path(path).name)
+    if not m:
+        return d
+    day = pd.Timestamp(m.group(1), tz="UTC")
+    off = abs((d.index.min() - day).total_seconds()) / 86400
+    if off > 2:
+        raise ValueError(f"파일명 날짜 {day:%Y-%m-%d} 와 자료 시각 {d.index.min()} 이 "
+                         f"{off:.0f}일 어긋난다. 시간 변수 단위를 확인할 것")
+    return d
+
+
 # 파일 종류 판별
 def read_any(path: Path) -> pd.DataFrame | None:
     n = Path(path).name.lower()
     try:
         if n.endswith(".nc"):
             if "xrsf" in n:
-                return read_xrs_nc(path)
+                return _check_dates(path, read_xrs_nc(path))
             if "mpsh" in n:
-                return read_mpsh_nc(path)
+                return _check_dates(path, read_mpsh_nc(path))
             if "sgps" in n:
-                return read_sgps_nc(path)
+                return _check_dates(path, read_sgps_nc(path))
             return None
         if n.endswith(".csv"):
+            if "_5m_" not in n or "science" in n:
+                return None
             if "cpflux" in n:
                 return read_epead_protons(path)
             if "e13ew" in n:
@@ -314,8 +333,9 @@ def build_dataset(src_dir: Path, out_path: Path, cadence_min: int = 5) -> pd.Dat
             f"  docs/variable_inventory.txt 로 변수명을 확인할 것")
 
     print(f"읽음 {len(used)}개 / 건너뜀 {len(skipped)}개")
-    df = pd.concat(parts, axis=1)
-    df = df.loc[:, ~df.columns.duplicated(keep="first")]
+    # 열 방향으로 붙이면 같은 이름의 열(날짜만 다른 파일들)이 겹쳐 첫 파일만 남는다.
+    # 행 방향으로 쌓고 시각별 첫 유효값을 고른다.
+    df = pd.concat(parts, axis=0, sort=False).groupby(level=0).first()
 
     report: dict = {}
     df = align(quality_control(df, report), cadence_min)

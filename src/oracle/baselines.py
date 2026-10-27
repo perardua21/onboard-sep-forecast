@@ -8,12 +8,31 @@
 """
 from __future__ import annotations
 
+import numpy as np
 import pandas as pd
 
 from .channels import M1_WM2, EVENT_ENTRY_PFU, S1_PFU, XRAY_FLAG
 
-#: 전자 배경 대비 비율 조건에 쓸 채널 (0.5 MeV 근처 - 설계 기준)
-ELECTRON_GATE_CH = "e_gt0p8"
+#: 전자 게이트 채널 후보. 설계값 0.5 MeV 에 가까운 순서.
+#: e_dif_* 는 ACE/EPAM(수백 keV), e_gt2 는 구·신세대 GOES 에 모두 있는 유일한 전자 채널.
+ELECTRON_GATE_PRIORITY = ("e_dif_hi", "e_dif_lo", "e_gt0p8", "e_gt2")
+ELECTRON_GATE_CH = "e_gt2"
+
+
+def pick_electron_channel(df: pd.DataFrame, masks: dict | None = None,
+                          priority=ELECTRON_GATE_PRIORITY, min_frac: float = 0.8) -> str:
+    """모든 평가 구간에서 관측률이 충분한 전자 채널 중 우선순위가 가장 높은 것.
+
+    구세대 GOES 에만 있는 >0.8 MeV 를 고정으로 쓰면 신세대 구간(검증·시험)
+    에서 전자 게이트가 한 번도 울리지 않는다.
+    """
+    masks = masks or {"전체": np.ones(len(df), bool)}
+    for c in priority:
+        if c not in df.columns:
+            continue
+        if all(m.any() and df.loc[m, c].notna().mean() >= min_frac for m in masks.values()):
+            return c
+    return ELECTRON_GATE_CH
 
 
 def _sustained(cond: pd.Series, minutes: float, cadence: int = 5) -> pd.Series:
@@ -50,7 +69,7 @@ def xray_only(df: pd.DataFrame, cadence: int = 5, minutes: float = 2,
 def electron_only(df: pd.DataFrame, cadence: int = 5, factor: float = 10.0,
                   minutes: float = 5, background_min: int = 60,
                   channel: str = ELECTRON_GATE_CH, **_) -> pd.Series:
-    """T1: 전자 0.5 MeV 가 1시간 배경 대비 ×10, 5분 연속.
+    """T1: 전자가 1시간 배경 대비 ×10, 5분 연속. 채널은 pick_electron_channel 로 정한다.
 
     minutes 는 식 구간에서도 5 로 둔다.
     """
@@ -85,7 +104,9 @@ def rule_gate(df: pd.DataFrame, cadence: int = 5, gate: dict | None = None) -> p
                           g.get("xray_m1_wm2", M1_WM2)), w, cadence).astype(int)
     b = _recent(electron_only(df, cadence, g.get("electron_ratio", 10.0),
                               g.get("electron_sustain_min", 5),
-                              g.get("electron_background_min", 60)), w, cadence).astype(int)
+                              g.get("electron_background_min", 60),
+                              channel=g.get("electron_channel", ELECTRON_GATE_CH)),
+                w, cadence).astype(int)
     c = _recent(proton_rise(df, cadence, g.get("proton_pfu", EVENT_ENTRY_PFU),
                             g.get("proton_sustain_min", 3)), w, cadence).astype(int)
     need = 2 if g.get("two_of_n", True) else 1
@@ -97,7 +118,9 @@ def rule_gate_no_xray(df: pd.DataFrame, cadence: int = 5, gate: dict | None = No
     g = gate or {}
     w = float(g.get("agree_window_min", 60))
     b = _recent(electron_only(df, cadence, g.get("electron_ratio", 10.0),
-                              g.get("electron_sustain_min", 5)), w, cadence).astype(int)
+                              g.get("electron_sustain_min", 5),
+                              channel=g.get("electron_channel", ELECTRON_GATE_CH)),
+                w, cadence).astype(int)
     c = _recent(proton_rise(df, cadence, g.get("proton_pfu", EVENT_ENTRY_PFU),
                             g.get("proton_sustain_min", 3)), w, cadence).astype(int)
     return (b + c) >= 2

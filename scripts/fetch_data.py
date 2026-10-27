@@ -51,42 +51,58 @@ LEGACY_KEEP = ("epead_cpflux_5m",     # 양성자 적분 >1~>100 MeV
 
 #: 연도 → 쓸 위성. 겹치는 해는 더 안정적인 쪽을 골랐다.
 def satellite(y: int) -> int:
-    if y <= 2016:
+    """연도별 주 위성.
+
+    학습 구간(2010~2019)은 GOES-15 하나로 맞춘다. 중간에 GOES-16 으로 바꾸면
+    학습 자료 안에서 기기가 바뀌어 보정 차이가 섞인다. GOES-15 는 2020년 3월
+    까지 운용됐다.
+    """
+    if y <= 2019:
         return 15
     if y <= 2022:
         return 16
     return 18
 
 
+#: 구세대 주 위성 자료가 없는 달(예: GOES-15 운용 시작 전인 2010년 초)의 대안
+LEGACY_FALLBACK = (15, 13)
+
+
 def sources(d: date):
-    """그 날짜에 받아야 할 (종류, 디렉터리 URL, 날짜패턴) 목록."""
+    """그 날짜에 받아야 할 (종류, [(디렉터리 URL, 파일명에 들어갈 날짜)...]) 목록.
+
+    후보를 앞에서부터 시도해 처음 되는 것을 쓴다.
+    """
     sat, y, m = satellite(d.year), d.year, d.month
     day = f"{d:%Y%m%d}"
     month = f"{d:%Y%m}"
-    # 구세대 CSV 는 2020년까지 있다. 신세대 제품에 그 날짜가 없을 때의 대안이다.
-    legacy_sat = 15 if y <= 2020 else None
-    legacy = ([("particles", LEGACY_CSV.format(sat=legacy_sat, y=y, m=m), month)]
-              if legacy_sat else [])
 
-    if sat >= 16:
-        out = []
-        for kind, keyword, prefer in (
-                ("xrs", "xrs", ("avg1m",)),
-                ("protons", "sgps", ("avg5m", "avg1m")),
-                ("electrons", "mpsh", ("avg5m", "avg1m"))):
-            cands = []
-            prod = resolve_product(sat, keyword, prefer)
+    if sat == 15:
+        xrs = [(LEGACY_XRS.format(sat=s_, y=y, m=m), day) for s_ in LEGACY_FALLBACK]
+        par = [(LEGACY_CSV.format(sat=s_, y=y, m=m), month) for s_ in LEGACY_FALLBACK]
+        if y >= 2017:                           # GOES-15 가 비면 GOES-16 X선으로
+            prod = resolve_product(16, "xrs", ("avg1m",))
             if prod:
-                cands.append((GOESR.format(sat=sat, prod=prod, y=y, m=m), day))
-            if kind == "xrs" and legacy_sat:
-                cands.append((LEGACY_XRS.format(sat=legacy_sat, y=y, m=m), day))
-            elif kind in ("protons", "electrons") and legacy_sat:
-                cands.append((LEGACY_CSV.format(sat=legacy_sat, y=y, m=m), month))
-            if cands:
-                out.append((kind, cands))
-        return out
-    return ([("xrs", [(LEGACY_XRS.format(sat=sat, y=y, m=m), day)])]
-            + [(k, [(u, p)]) for k, u, p in legacy])
+                xrs.append((GOESR.format(sat=16, prod=prod, y=y, m=m), day))
+        return [("xrs", xrs), ("particles", par)]
+
+    out = []
+    for kind, keyword, prefer in (
+            ("xrs", "xrs", ("avg1m",)),
+            ("protons", "sgps", ("avg5m", "avg1m")),
+            ("electrons", "mpsh", ("avg5m", "avg1m"))):
+        cands = []
+        prod = resolve_product(sat, keyword, prefer)
+        if prod:
+            cands.append((GOESR.format(sat=sat, prod=prod, y=y, m=m), day))
+        if y == 2020:                           # GOES-15 는 2020년 3월까지
+            if kind == "xrs":
+                cands.append((LEGACY_XRS.format(sat=15, y=y, m=m), day))
+            else:
+                cands.append((LEGACY_CSV.format(sat=15, y=y, m=m), month))
+        if cands:
+            out.append((kind, cands))
+    return out
 
 
 # 네트워크

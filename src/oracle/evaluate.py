@@ -15,39 +15,63 @@ from .alarm_episodes import cluster
 
 
 # 사건 단위
-def event_metrics(alarm: pd.Series, events, grace_hours: float = 2.0,
+def event_metrics(alarm: pd.Series, events, grace_hours: float = 0.5,
                   min_lead_min: float = 0.0, valid_mask: pd.Series | None = None,
-                  cluster_gap_hours: float = 3.0) -> dict:
+                  cluster_gap_hours: float = 0.5,
+                  segment_hours: float | None = None) -> dict:
     """탐지율·오경보비·CSI·선행시간.
 
-    TP      : 경보 묶음 시작 이후 (묶음 끝 + grace) 안에 onset 이 있다
-    선행시간 : onset − 묶음 시작
+    경보는 "앞으로 H분 안에 사건"이라는 주장이다. 그래서
+      - H분 넘게 끊긴 경보는 별개의 경보로 본다 (cluster_gap_hours = H)
+      - 경보가 끝난 뒤 H분까지 온 사건은 맞힌 것으로 본다 (grace_hours = H)
+      - 오래 켜진 경보는 H분마다 주장을 새로 한 것으로 쪼개 센다 (segment_hours = H)
+
+    마지막 규칙이 없으면 경보를 계속 켜 두기만 해도 묶음 하나가 사건을
+    포함해 탐지율 100%, 오경보비 0% 가 된다.
+
+    선행시간은 사건을 맞힌 조각이 속한 연속 경보의 시작부터 잰다.
+    사용자가 실제로 경보를 받기 시작한 시각이기 때문이다. 그 앞부분이
+    틀린 주장이었다면 그만큼 오경보로 따로 잡힌다.
+
     탐지율   : 선행시간이 min_lead_min 이상인 사건 수 ÷ 전체 사건 수
-    오경보비 : 어떤 사건과도 맺어지지 않은 묶음 수 ÷ 전체 묶음 수
+    오경보비 : 사건과 맺어지지 않은 조각 수 ÷ 전체 조각 수
     CSI     : hits / (hits + misses + false alarms)
     """
     if valid_mask is not None:
         alarm = alarm.where(valid_mask, False)
-    clusters = cluster(alarm, cluster_gap_hours)
+    seg_td = pd.Timedelta(hours=segment_hours if segment_hours else grace_hours)
+    grace = pd.Timedelta(hours=grace_hours)
+    runs = cluster(alarm, cluster_gap_hours)
+    segs = []                                   # (조각 시작, 조각 끝, 연속 경보 시작)
+    for cs, ce in runs:
+        t = cs
+        while True:
+            e = min(t + seg_td, ce)
+            segs.append((t, e, cs))
+            if e >= ce:
+                break
+            t = e
     onsets = [o for o, _ in events]
 
     best: dict[int, float] = {}
     best_at: dict[int, pd.Timestamp] = {}
-    matched = []                       # 묶음별 사건 연결 여부
-    for cs, ce in clusters:
-        hit = next((k for k, o in enumerate(onsets)
-                    if cs <= o <= ce + pd.Timedelta(hours=grace_hours)), None)
+    matched = []
+    for ss, se, rs in segs:
+        hit = next((k for k, o in enumerate(onsets) if ss <= o <= se + grace), None)
         matched.append(hit)
         if hit is None:
             continue
-        lead = (onsets[hit] - cs).total_seconds() / 60.0
+        lead = (onsets[hit] - rs).total_seconds() / 60.0
         if hit not in best or lead > best[hit]:
-            best[hit], best_at[hit] = lead, cs
+            best[hit], best_at[hit] = lead, rs
+    clusters = [(ss, se) for ss, se, _ in segs]
 
     n_ev = len(onsets)
     detected_flag = np.array([(k in best and best[k] >= min_lead_min)
                               for k in range(n_ev)], dtype=bool)
     leads = np.array(sorted(best.values()), dtype=float)
+    lead_by_event = np.array([best.get(k, np.nan) if detected_flag[k] else np.nan
+                              for k in range(n_ev)], dtype=float)
     hits = int(detected_flag.sum())
     false = int(sum(1 for m in matched if m is None))
     misses = n_ev - hits
@@ -56,6 +80,7 @@ def event_metrics(alarm: pd.Series, events, grace_hours: float = 2.0,
     return {
         "n_events": n_ev,
         "n_alarms": len(clusters),
+        "n_runs": len(runs),
         "n_detected": hits,
         "n_false": false,
         "POD": hits / n_ev if n_ev else float("nan"),
@@ -65,6 +90,7 @@ def event_metrics(alarm: pd.Series, events, grace_hours: float = 2.0,
         "lead_median_min": float(np.median(leads)) if leads.size else float("nan"),
         "lead_p10_min": float(np.percentile(leads, 10)) if leads.size else float("nan"),
         "leads_min": leads.tolist(),
+        "lead_by_event": lead_by_event,
         "detected_flag": detected_flag,
         "cluster_matched": matched,
         "alarm_times": {k: best_at[k] for k in best_at},
@@ -72,6 +98,41 @@ def event_metrics(alarm: pd.Series, events, grace_hours: float = 2.0,
         "onsets": onsets,
         "clusters": clusters,
     }
+
+
+def select_threshold(prob, index, events, valid_mask, target_far: float = 0.35,
+                     persist_points: int = 2, horizon_min: int = 30,
+                     grid=None, verbose: bool = True) -> tuple[float, dict]:
+    """검증집합에서 사건 단위 지표로 임계값을 고른다.
+
+    보고하는 것이 사건 단위 탐지율·오경보비이므로 고르는 기준도 같아야 한다.
+    표본 단위 오경보율로 고르면 둘이 따로 논다.
+
+    오경보비 ≤ target 인 것 중 탐지율이 가장 높은 것, 같으면 평균 선행시간이
+    긴 것. 조건을 만족하는 값이 없으면 오경보비가 가장 낮은 것을 쓰고 알린다.
+    """
+    from .predict import to_alarm
+    grid = np.round(np.arange(0.05, 0.951, 0.025), 3) if grid is None else grid
+    h = horizon_min / 60.0
+    vm = pd.Series(np.asarray(valid_mask, dtype=bool), index=index)
+    rows = []
+    for th in grid:
+        a = to_alarm(prob, index, float(th), persist_points).where(vm, False)
+        m = event_metrics(a, events, grace_hours=h, cluster_gap_hours=h)
+        rows.append((float(th), m["POD"], m["FAR"], m["lead_mean_min"]))
+    ok = [r for r in rows if r[2] == r[2] and r[2] <= target_far and r[1] == r[1]]
+    if ok:
+        best = max(ok, key=lambda r: (r[1], -r[2], r[3] if r[3] == r[3] else -1, r[0]))
+        note = "조건 충족"
+    else:
+        cand = [r for r in rows if r[2] == r[2]] or rows
+        best = min(cand, key=lambda r: (r[2] if r[2] == r[2] else 9, -r[1]))
+        note = f"오경보비 {target_far:.0%} 이하를 만족하는 임계값이 없음"
+        if verbose:
+            print(f"  ! 검증집합에서 {note}. 오경보비가 가장 낮은 {best[0]:.3f} 을 쓴다 "
+                  f"(오경보비 {best[2]:.0%}, 탐지율 {best[1]:.0%})")
+    return best[0], {"POD": best[1], "FAR": best[2], "lead_mean_min": best[3],
+                     "note": note, "n_events": len(events)}
 
 
 # 확률 품질
@@ -143,13 +204,17 @@ def block_bootstrap(m: dict, n_boot: int = 2000, mode: str = "event",
     rng = np.random.default_rng(seed)
     det = np.asarray(m["detected_flag"], dtype=bool)
     unmatched = np.array([x is None for x in m["cluster_matched"]], dtype=bool)
-    leads = np.asarray(m["leads_min"], dtype=float)
+    lbe = np.asarray(m.get("lead_by_event", []), dtype=float)
+
+    def leads_of(em):
+        x = lbe[em] if em.size and lbe.size else np.array([])
+        return x[np.isfinite(x)]
 
     if mode == "event":
         def draw():
             e = rng.integers(0, det.size, det.size) if det.size else np.array([], int)
             c = rng.integers(0, unmatched.size, unmatched.size) if unmatched.size else np.array([], int)
-            return det[e], unmatched[c], leads[rng.integers(0, leads.size, leads.size)] if leads.size else leads
+            return det[e], unmatched[c], leads_of(e)
     else:
         ev_t = pd.DatetimeIndex(m["onsets"]) if m["onsets"] else pd.DatetimeIndex([])
         cl_t = pd.DatetimeIndex([c[0] for c in m["clusters"]]) if m["clusters"] else pd.DatetimeIndex([])
@@ -168,7 +233,7 @@ def block_bootstrap(m: dict, n_boot: int = 2000, mode: str = "event",
             cm = np.concatenate([np.flatnonzero(np.asarray(cl_b) == b) for b in pick]) \
                 if len(cl_t) else np.array([], int)
             lm = det[em] if em.size else np.array([], bool)
-            return lm, unmatched[cm] if cm.size else np.array([], bool), leads
+            return lm, unmatched[cm] if cm.size else np.array([], bool), leads_of(em)
 
     pods, fars, csis, lmeans = [], [], [], []
     for _ in range(n_boot):
