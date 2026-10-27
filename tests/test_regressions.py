@@ -163,3 +163,20 @@ def test_policy_satellite_file_is_read_first():
     assert _policy_rank(Path("g15_epead_e13ew_5m_20170901_20170930.csv")) == 0
     assert _policy_rank(Path("sci_mpsh-l2-avg5m_g16_d20170910_v2-0-3.nc")) == 2
     assert _policy_rank(Path("sci_sgps-l2-avg5m_g16_d20211028_v2-0-0.nc")) == 0
+
+
+def test_ace_hapi_reads_header_and_fill():
+    """ACE 는 HAPI CSV 로 받는다. 열 이름과 결측값을 머리말에서 읽는다."""
+    import json
+    meta = {"HAPI": "2.0", "parameters": [
+        {"name": "Time", "type": "isotime"},
+        {"name": "DE3", "type": "double", "units": "1/(cm^2 s sr MeV)", "fill": "-1.0E31"},
+        {"name": "DE4", "type": "double", "units": "1/(cm^2 s sr MeV)", "fill": "-1.0E31"}]}
+    head = "\n".join("#" + l for l in json.dumps(meta, indent=1).splitlines())
+    rows = "2017-09-10T00:00:00.000Z,12.5,3.1\n2017-09-10T00:05:00.000Z,-1.0E31,3.4\n"
+    p = Path(tempfile.mkdtemp()) / "ac_h1_epm_201709.csv"
+    p.write_text(head + "\n" + rows)
+    d = ingest.read_any(p)
+    assert list(d.columns) == ["e_dif_lo", "e_dif_hi"]
+    assert np.isnan(d["e_dif_lo"].iloc[1]) and d["e_dif_hi"].iloc[1] == 3.4
+    assert d.index[0] == pd.Timestamp("2017-09-10", tz="UTC")

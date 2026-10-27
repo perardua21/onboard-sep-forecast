@@ -171,10 +171,10 @@ def read_mpsh_nc(path: Path) -> pd.DataFrame | None:
                 # 저에너지·고에너지 대표 채널을 에너지로 고른다 (keV)
                 lo = int(np.nanargmin(np.abs(e - 250.0)))
                 hi = int(np.nanargmin(np.abs(e - 450.0)))
-                out["e_dif_lo"] = d[:, lo]
-                out["e_dif_hi"] = d[:, hi]
-                out.attrs["e_dif_lo_keV"] = float(e[lo])
-                out.attrs["e_dif_hi_keV"] = float(e[hi])
+                # e_dif_* 는 ACE 몫이다. GOES 미분 전자는 정지궤도 방사선대 전자라
+                # 이름을 따로 두고 모델 입력에는 넣지 않는다.
+                out["e_mpsh_lo"] = d[:, lo]
+                out["e_mpsh_hi"] = d[:, hi]
         if "EclipseFlag" in ds.variables:
             out["eclipse_flag"] = np.asarray(ds["EclipseFlag"].values)
         return out
@@ -322,6 +322,47 @@ def _check_dates(path: Path, d: pd.DataFrame | None) -> pd.DataFrame | None:
     return d
 
 
+def read_ace_hapi(path: Path) -> pd.DataFrame | None:
+    """CDAWeb HAPI CSV (AC_H1_EPM). 머리말(#)의 JSON 에서 열 이름과 결측값을 읽는다.
+
+    e_dif_lo = DE3 (0.103–0.175 MeV), e_dif_hi = DE4 (0.175–0.315 MeV).
+    DE4 가 Núñez(2018)·REleASE 가 쓰는 준상대론적 전자 대역이다.
+    """
+    import json
+    from io import StringIO
+    txt = Path(path).read_text(encoding="utf-8", errors="replace")
+    head = "\n".join(l[1:] for l in txt.splitlines() if l.startswith("#"))
+    body = "\n".join(l for l in txt.splitlines() if l and not l.startswith("#"))
+    if not body:
+        return None
+    names, fills = None, {}
+    if head.strip():
+        try:
+            meta = json.loads(head)
+            names = [p["name"] for p in meta["parameters"]]
+            fills = {p["name"]: float(p["fill"]) for p in meta["parameters"]
+                     if p.get("fill") not in (None, "", "null")}
+        except Exception:                                    # noqa: BLE001
+            names = None
+    d = pd.read_csv(StringIO(body), header=None)
+    if names is None or len(names) != d.shape[1]:
+        names = ["Time"] + list(("DE1", "DE2", "DE3", "DE4"))[: d.shape[1] - 1]
+    d.columns = names
+    d.index = pd.to_datetime(d.iloc[:, 0], utc=True, errors="coerce")
+    d = d.drop(columns=names[0])
+    d = d[d.index.notna()]
+    for c, f in fills.items():
+        if c in d.columns:
+            d[c] = d[c].where(d[c] != f)
+    d = d.apply(pd.to_numeric, errors="coerce")
+    out = pd.DataFrame(index=d.index)
+    if "DE3" in d.columns:
+        out["e_dif_lo"] = d["DE3"]
+    if "DE4" in d.columns:
+        out["e_dif_hi"] = d["DE4"]
+    return out if len(out.columns) else None
+
+
 # 파일 종류 판별
 def read_any(path: Path) -> pd.DataFrame | None:
     n = Path(path).name.lower()
@@ -335,6 +376,8 @@ def read_any(path: Path) -> pd.DataFrame | None:
                 return _check_dates(path, read_sgps_nc(path))
             return None
         if n.endswith(".csv"):
+            if n.startswith("ac_h1_epm"):
+                return read_ace_hapi(path)
             if "_5m_" not in n or "science" in n:
                 return None
             if "cpflux" in n:

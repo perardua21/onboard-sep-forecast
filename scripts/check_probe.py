@@ -7,6 +7,7 @@
 1. 사건 이틀의 값과 10 pfu 도달 시각 (공식 시작 시각과 비교)
 2. 조용한 시간의 ≥10 MeV 바닥값 — '양성자 ≥1 pfu' 게이트가 의미가 있는가
 3. 같은 시각 두 기기 비교 (2017-09-10 에는 GOES-15 와 GOES-16 이 둘 다 있다)
+4. ACE 준상대론적 전자가 양성자보다 먼저 오르는가 (선행 신호로 쓸 수 있는가)
 """
 from __future__ import annotations
 
@@ -100,6 +101,29 @@ def main():
         print(f"  {name:10s}  GOES16/GOES15 비 중앙값 {r.median():.3g}  "
               f"(10~90% {r.quantile(.1):.3g}~{r.quantile(.9):.3g})  로그 상관 {c:.2f}  n={len(j)}")
     print("  (비가 1 에서 멀면 기기 간 눈금 차이다. 상관이 높으면 모양은 같다)")
+
+    section("4. ACE 전자(0.175–0.315 MeV)가 양성자보다 먼저 오르는가")
+    if "e_dif_hi" not in df.columns or df["e_dif_hi"].notna().sum() == 0:
+        print("  ACE 자료가 없다. python scripts\\fetch_data.py --probe 를 먼저 돌릴 것")
+    else:
+        from oracle.baselines import electron_only
+        for o, _ in ev:
+            d = f"{o:%Y-%m-%d}"
+            w = df.loc[o - pd.Timedelta(hours=6): o + pd.Timedelta(hours=2)]
+            e = w["e_dif_hi"].astype(float)
+            if e.notna().mean() < 0.5:
+                print(f"  {d}: 사건 앞뒤 ACE 결측이 많다 ({e.notna().mean():.0%} 관측)")
+                continue
+            bg = e.rolling(12, min_periods=3).median()
+            ratio = (e / bg).loc[:o]
+            gate = electron_only(w, cadence=5, channel="e_dif_hi").loc[:o]
+            first = gate[gate].index[0] if gate.any() else None
+            lead = f"{(o - first).total_seconds()/60:.0f}분 전" if first is not None else "울리지 않음"
+            print(f"  {d}  양성자 10 pfu {o:%H:%M}  ·  전자 ×10 조건 {lead}  ·  "
+                  f"사건 전 최대 배경비 {ratio.max():.1f}배")
+            print(w["e_dif_hi"].resample("1h").max().to_frame("ACE DE4 1시간 최대")
+                  .T.to_string(float_format=lambda x: f"{x:.3g}"))
+        print("  (전자 조건이 양성자보다 수십 분 먼저 울리면 선행 신호로 쓸 수 있다)")
 
     print("\n이 화면 전체를 복사해서 보내면 된다.")
 

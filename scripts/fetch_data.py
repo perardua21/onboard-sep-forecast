@@ -205,6 +205,48 @@ def download(url: str, dest: Path) -> dict | None:
     return None
 
 
+# ACE/EPAM 준상대론적 전자. 태양풍 속(L1)에서 재므로 정지궤도 방사선대 전자와 섞이지 않는다.
+# CDAWeb HAPI 가 CSV 로 바로 준다. include=header 로 받으면 변수 이름·단위·결측값이
+# 머리말(#)에 같이 오므로 열 이름을 추측하지 않는다.
+ACE_HAPI = "https://cdaweb.gsfc.nasa.gov/hapi/data"
+ACE_DATASET = "AC_H1_EPM"                      # 5분 level 2
+ACE_PARAMS = ("DE1", "DE2", "DE3", "DE4")      # 0.038–0.053 / –0.103 / –0.175 / 0.175–0.315 MeV
+
+
+def fetch_ace_month(y: int, m: int, manifest: list) -> None:
+    dest = RAW / "ace" / f"ac_h1_epm_{y:04d}{m:02d}.csv"
+    if dest.exists() and dest.stat().st_size > 0:
+        print(f"  = 이미 있음  {dest.name}")
+        return
+    start = f"{y:04d}-{m:02d}-01T00:00:00Z"
+    ny, nm = (y + 1, 1) if m == 12 else (y, m + 1)
+    stop = f"{ny:04d}-{nm:02d}-01T00:00:00Z"
+    params = ",".join(ACE_PARAMS)
+    urls = [   # HAPI 2.x 이름과 3.x 이름 둘 다 시도
+        f"{ACE_HAPI}?id={ACE_DATASET}&parameters={params}&time.min={start}&time.max={stop}"
+        f"&format=csv&include=header",
+        f"{ACE_HAPI}?dataset={ACE_DATASET}&parameters={params}&start={start}&stop={stop}"
+        f"&format=csv&include=header",
+    ]
+    for u in urls:
+        try:
+            blob = get(u, timeout=300)
+        except Exception as e:                               # noqa: BLE001
+            last = e
+            continue
+        if not blob.strip():
+            last = "빈 응답"
+            continue
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(blob)
+        print(f"  + {dest.name}  ({len(blob)/1e6:.1f} MB)")
+        manifest.append({"url": u, "path": str(dest.relative_to(ROOT)), "bytes": len(blob),
+                         "sha256": hashlib.sha256(blob).hexdigest(), "kind": "ace",
+                         "fetched": time.strftime("%Y-%m-%dT%H:%M:%S")})
+        return
+    print(f"  ! ACE {y}-{m:02d} 를 못 받았다: {last}")
+
+
 def fetch_day(d: date, manifest: list) -> None:
     print(f"\n[{d:%Y-%m-%d}]  GOES-{satellite(d.year)}")
     for kind, candidates in sources(d):
@@ -330,6 +372,10 @@ def main():
             fetch_day(d, manifest)
             if len(days) > 30 and i % 30 == 0:
                 print(f"  ... {i}/{len(days)}일")
+        months = sorted({(d.year, d.month) for d in days})
+        print(f"\n[ACE 전자] {len(months)}개월")
+        for y, m in months:
+            fetch_ace_month(y, m, manifest)
     except KeyboardInterrupt:
         print("\n중단됨. 받은 것까지 manifest 에 남긴다.")
 

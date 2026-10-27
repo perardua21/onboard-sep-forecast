@@ -110,41 +110,43 @@ M1급 = `xrs_long` ≥ 1×10⁻⁵ W/m².
 
 ## 4. 전자 5채널
 
-### GOES 전자 - 3채널
+### 정지궤도 GOES 전자는 태양 선행 신호가 아니다
 
-**2010 ~ 2019**, 파일 `g15_epead_e13ew_5m_*.csv`
+2017-09-10 같은 시각 GOES-15 EPEAD 와 GOES-16 MPS-HI 의 >2 MeV 전자를 비교하면
+비 중앙값 0.83(10~90% 0.45~1.04), **로그 상관 −0.66** 이었다. 같은 물리량을 같은
+시각에 쟀는데 반대로 움직인다. 정지궤도 >2 MeV 전자는 대부분 지구 방사선대
+전자라 위성 위치에 따라 다르게 움직이고, EPEAD 전자 채널은 SEP 양성자에
+오염된다고 알려져 있다. 어느 쪽이든 GOES 전자로는 "양성자보다 먼저 오는 태양
+전자"를 잴 수 없다.
 
-| 공통 이름 | 원본 열 | 에너지 |
+그래서 전자 선행 신호는 **ACE/EPAM** 으로 잰다. ACE 는 L1(태양풍 속)에 있어
+방사선대와 무관하고, 1997년부터 지금까지 같은 기기라 학습·시험 구간이 이어진다.
+
+### ACE/EPAM — `e_dif_lo`, `e_dif_hi`
+
+CDAWeb HAPI 로 월 단위 CSV 를 받는다 (`AC_H1_EPM`, 5분 level 2).
+`include=header` 로 받아 머리말의 변수 이름과 결측값을 그대로 쓴다.
+
+| 공통 이름 | 원본 | 에너지 |
 |---|---|---|
-| `e_gt0p8` | `E1E_COR_FLUX`, `E1W_COR_FLUX` | > 0.8 MeV |
-| `e_gt2` | `E2E_COR_FLUX`, `E2W_COR_FLUX` | > 2 MeV |
-| `e_gt4` | `E3E_COR_FLUX`, `E3W_COR_FLUX` | > 4 MeV |
+| `e_dif_lo` | `DE3` | 0.103–0.175 MeV |
+| `e_dif_hi` | `DE4` | **0.175–0.315 MeV** (Núñez 2018, REleASE 가 쓰는 대역) |
 
-`_UNCOR_FLUX` 가 아니라 `_COR_FLUX`(보정본)를 쓴다. E/W 처리는 양성자와 같다.
+전자 게이트는 `e_dif_hi` 를 먼저 쓴다 (`baselines.pick_electron_channel`).
 
-**2020 ~ 2026**, 파일 `sci_mpsh-l2-avg5m_g{NN}_*.nc`
+### GOES 전자 — `e_gt0p8`, `e_gt2`, `e_gt4`
 
-| 공통 이름 | 원본 변수 | 비고 |
+| 공통 이름 | 2010~2019 GOES-15 EPEAD | 2020~ GOES-16/18 MPS-HI |
 |---|---|---|
-| `e_gt2` | `AvgIntElectronFlux` | E11 > 2 MeV 적분. 망원경 5개 중 최댓값 |
-| `e_dif_lo` | `AvgDiffElectronFlux` 중 250 keV 근처 | `DiffElectronEffectiveEnergy` 로 채널 선택 |
-| `e_dif_hi` | `AvgDiffElectronFlux` 중 450 keV 근처 | 같음 |
+| `e_gt0p8` | `E1E/E1W_COR_FLUX` (>0.8 MeV) | 없음 |
+| `e_gt2` | `E2E/E2W_COR_FLUX` (>2 MeV) | `AvgIntElectronFlux` (E11 >2 MeV) |
+| `e_gt4` | `E3E/E3W_COR_FLUX` (>4 MeV) | 없음 |
 
-MPS-HI 에는 `EclipseFlag` 가 있다. 지구 그림자 구간 표시이며 품질 확인에 쓴다
-(달의 식과는 다른 것이다).
+`_COR_FLUX`(보정본)를 쓰고, 동·서(또는 망원경 5개) 중 큰 값을 쓴다.
+MPS-HI 의 미분 채널은 `e_mpsh_lo`, `e_mpsh_hi` 로 따로 두고 모델 입력에 넣지 않는다.
 
-구세대와 신세대의 전자 채널이 **일대일로 맞지 않는다.** `e_gt0p8`, `e_gt4` 는
-신세대 구간에서 결측이 되고, `e_dif_lo/hi` 는 구세대 구간에서 결측이 된다.
-각 채널의 유무 플래그로 표시하고, 제거 실험에서 그 영향을 본다.
-
-### ACE 전자 - 2채널 (아직 받지 않음)
-
-설계 기준이 요구하는 준상대론적 전자는 수백 keV 대역이고, 기존 연구
-(Núñez 2018, REleASE)가 쓰는 것은 **ACE/EPAM 0.175–0.375 MeV** 다.
-GOES 전자(MeV 급)는 보조다.
-
-받는 곳: NASA CDAWeb `AC_H1_EPM` (5분 level 2).
-받고 나면 실제 에너지 경계를 **숫자로** 여기에 적을 것.
+세대 공통인 `e_gt2` 만 정합 단계를 통과하지만, 위 이유로 선행 신호로서의 가치는
+낮다. 제거 실험에서 `e_gt2` 를 뺀 경우와 비교한다.
 
 ---
 
