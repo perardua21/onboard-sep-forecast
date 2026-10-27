@@ -358,9 +358,13 @@ def quality_control(df: pd.DataFrame, report: dict | None = None) -> pd.DataFram
         if c.endswith(("_flag", "_ok")):
             continue
         s = pd.to_numeric(out[c], errors="coerce")
-        bad = s.isna() | (s <= -1e30) | (s < 0)
-        rep[c] = {"n": int(len(s)), "invalid": int(bad.sum()),
-                  "invalid_pct": round(float(bad.mean()) * 100, 3)}
+        present = s.notna()
+        bad = present & ((s <= -1e30) | (s < 0))
+        n_present = int(present.sum())
+        # 자료가 없는 시각(공백)과 값은 있는데 버린 것(품질 탈락)을 나눠 센다.
+        # 둘을 합쳐 '무효'라고 하면 기간 사이 공백까지 불량처럼 보인다.
+        rep[c] = {"n": int(len(s)), "present": n_present, "invalid": int(bad.sum()),
+                  "invalid_pct": round(100.0 * int(bad.sum()) / n_present, 3) if n_present else 0.0}
         out[c] = s.where(~bad)
     return out
 
@@ -420,6 +424,9 @@ def build_dataset(src_dir: Path, out_path: Path, cadence_min: int = 5) -> pd.Dat
     report: dict = {}
     df = align(quality_control(df, report), cadence_min)
     df = add_xray_flag(df)
+    # 관측률은 없는 채널을 0 으로 채우기 전에 센다
+    coverage = {c: (float(df[c].notna().mean()) * 100 if c in df.columns else None)
+                for c in ALL_COLUMNS}
     df = fill_missing(df)
 
     missing = [c for c in ALL_COLUMNS if c not in df.columns or df[c].isna().all()]
@@ -431,9 +438,16 @@ def build_dataset(src_dir: Path, out_path: Path, cadence_min: int = 5) -> pd.Dat
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path = _write_table(df, out_path)
     print(f"저장 {out_path}  {df.index[0]} ~ {df.index[-1]}  {len(df):,} 행")
-    for c, r in sorted(report.items()):
-        if r["invalid_pct"] > 1:
-            print(f"  {c:12s} 무효 {r['invalid_pct']:.2f}%")
+    print("  채널별 관측률(전체 기간 대비) · 품질 탈락(관측값 중)")
+    for c in ALL_COLUMNS:
+        if c in DOSE:
+            continue
+        cov = coverage.get(c)
+        if cov is None:
+            print(f"    {c:10s} 없음")
+            continue
+        bad = report.get(c, {}).get("invalid_pct", 0.0)
+        print(f"    {c:10s} 관측 {cov:5.1f}%   탈락 {bad:4.1f}%")
     return df
 
 
