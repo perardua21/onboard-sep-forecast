@@ -193,3 +193,27 @@ def test_absent_channel_is_nan_so_harmonize_and_gate_skip_it():
                         {"a": m}, 0.8, verbose=False)
     assert "e_dif_hi" not in keep and "dose_main" not in keep
     assert baselines.pick_electron_channel(df, {"a": m}) == "e_gt2"
+
+
+def test_lagged_background_catches_gradual_electron_rise():
+    """2021-10-28 처럼 한 시간 넘게 천천히 오르면 직전 1시간 배경으로는 ×10 이 안 된다."""
+    idx = pd.date_range("2021-10-28", periods=288, freq="5min", tz="UTC")
+    e = np.full(len(idx), 34.0)
+    e[192:216] = np.geomspace(34, 1100, 24)      # 16:00~18:00 두 시간에 걸쳐 30배
+    e[216:] = 1100
+    df = pd.DataFrame({"e_dif_hi": e}, index=idx)
+    assert not baselines.electron_only(df, channel="e_dif_hi").any()
+    assert baselines.electron_only(df, channel="e_dif_hi", background_lag_min=60).any()
+
+
+def test_relative_proton_gate_ignores_high_quiet_floor():
+    """신세대 바닥값(약 1 pfu)에서 '≥1 pfu' 가 계속 켜지는 문제."""
+    idx = pd.date_range("2021-10-28", periods=288, freq="5min", tz="UTC")
+    p = np.full(len(idx), 1.1)                    # 조용한데 1 pfu 위
+    p[200:] = 15.0                                # 사건
+    df = pd.DataFrame({"p_gt10": p}, index=idx)
+    absolute = baselines.proton_rise(df)
+    relative = baselines.proton_rise(df, mode="relative")
+    assert absolute[:190].mean() > 0.9           # 원안은 조용한 시간 내내 켜짐
+    assert not relative[:190].any()              # 배경 대비는 꺼져 있음
+    assert relative[205:].any()

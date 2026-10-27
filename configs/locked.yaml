@@ -64,8 +64,11 @@ gate:                             # 초기 탐색값. 검증집합에서 잠근�
   electron_ratio: 10.0
   electron_background_min: 60
   electron_sustain_min: 5
+  electron_background_lag_min: 0  # 0 = 직전 1시간 배경(원안). 천천히 오르는 사건을 놓치면 60 검토
   proton_pfu: 1.0
   proton_sustain_min: 3
+  proton_mode: absolute           # absolute(원안) | relative. 신세대 바닥값이 약 1 pfu 라 검토 필요
+  proton_ratio: 3.0               # relative 일 때 6시간 앞선 배경 대비 배수
   model_prob: 0.7
   model_persist_points: 2
   two_of_n: true

@@ -75,6 +75,14 @@ def main():
         over = float((q >= GATE_PFU).mean())
         print(f"  {day}  중앙값 {q.median():.2f} pfu   게이트 이상인 시간 {over:.0%}")
     print("  (게이트 이상인 시간이 대부분이면 '≥1 pfu' 조건이 그 구간에서 변별력이 없다)")
+    from oracle.baselines import proton_rise
+    for day, (label, quiet_end) in DAYS.items():
+        ww = df.loc[pd.Timestamp(day, tz="UTC") - pd.Timedelta(hours=8):f"{day} {quiet_end}"]
+        if ww["p_gt10"].notna().sum() == 0:
+            continue
+        a = proton_rise(ww).loc[day:].mean()
+        r = proton_rise(ww, mode="relative").loc[day:].mean()
+        print(f"  {day}  조용한 시간 게이트 켜짐  원안 {a:.0%}  /  배경 대비 3배 {r:.0%}")
 
     section("3. 같은 시각 두 기기 비교 (2017-09-10)")
     pairs = [
@@ -116,14 +124,18 @@ def main():
                 continue
             bg = e.rolling(12, min_periods=3).median()
             ratio = (e / bg).loc[:o]
-            gate = electron_only(w, cadence=5, channel="e_dif_hi").loc[:o]
-            first = gate[gate].index[0] if gate.any() else None
-            lead = f"{(o - first).total_seconds()/60:.0f}분 전" if first is not None else "울리지 않음"
-            print(f"  {d}  양성자 10 pfu {o:%H:%M}  ·  전자 ×10 조건 {lead}  ·  "
-                  f"사건 전 최대 배경비 {ratio.max():.1f}배")
+            def first_fire(lag):
+                ww = df.loc[o - pd.Timedelta(hours=8): o + pd.Timedelta(hours=2)]
+                g = electron_only(ww, cadence=5, channel="e_dif_hi",
+                                  background_lag_min=lag).loc[:o]
+                f = g[g].index[0] if g.any() else None
+                return f"{(o - f).total_seconds()/60:.0f}분 전" if f is not None else "울리지 않음"
+            print(f"  {d}  양성자 10 pfu {o:%H:%M}  ·  전자 ×10 (원안) {first_fire(0)}"
+                  f"  ·  (배경 1시간 앞당김) {first_fire(60)}  ·  원안 최대 배경비 {ratio.max():.1f}배")
             print(w["e_dif_hi"].resample("1h").max().to_frame("ACE DE4 1시간 최대")
                   .T.to_string(float_format=lambda x: f"{x:.3g}"))
         print("  (전자 조건이 양성자보다 수십 분 먼저 울리면 선행 신호로 쓸 수 있다)")
+        print("  '배경 1시간 앞당김' 은 참고값이다. 사건 세 개로 규칙을 고르지 않는다.")
 
     print("\n이 화면 전체를 복사해서 보내면 된다.")
 

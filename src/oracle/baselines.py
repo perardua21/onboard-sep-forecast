@@ -68,21 +68,42 @@ def xray_only(df: pd.DataFrame, cadence: int = 5, minutes: float = 2,
 
 def electron_only(df: pd.DataFrame, cadence: int = 5, factor: float = 10.0,
                   minutes: float = 5, background_min: int = 60,
-                  channel: str = ELECTRON_GATE_CH, **_) -> pd.Series:
+                  channel: str = ELECTRON_GATE_CH, background_lag_min: int = 0,
+                  **_) -> pd.Series:
     """T1: 전자가 1시간 배경 대비 ×10, 5분 연속. 채널은 pick_electron_channel 로 정한다.
 
-    minutes 는 식 구간에서도 5 로 둔다.
+    background_lag_min 만큼 앞선 1시간을 배경으로 쓴다. 0 이면 직전 1시간(설계 원안).
+    한 시간 넘게 천천히 오르는 사건에서는 직전 1시간 배경이 같이 올라가 비율이
+    ×10 에 못 미친다 (2021-10-28: ACE 전자는 30배 넘게 올랐는데 비율 최대 6.9배).
+    값은 검증집합까지만 보고 정한다. 사건 몇 개를 보고 고르지 않는다.
     """
     e = df[channel].astype(float).clip(lower=1e-12)
     nb = max(4, int(round(background_min / cadence)))
     bg = e.rolling(nb, min_periods=max(3, nb // 4)).median()
+    lag = int(round(background_lag_min / cadence))
+    if lag > 0:
+        bg = bg.shift(lag)
     return _sustained(e >= factor * bg, minutes, cadence)
 
 
 def proton_rise(df: pd.DataFrame, cadence: int = 5, pfu: float = EVENT_ENTRY_PFU,
-                minutes: float = 3, **_) -> pd.Series:
-    """T2: ≥10 MeV 양성자 ≥1 pfu, 3분 연속. 게이트 전용 - 모델 입력이 아니다."""
-    return _sustained(df["p_gt10"] >= pfu, minutes, cadence)
+                minutes: float = 3, mode: str = "absolute", ratio: float = 3.0,
+                background_min: int = 360, **_) -> pd.Series:
+    """T2: ≥10 MeV 양성자 ≥1 pfu, 3분 연속. 게이트 전용.
+
+    mode="absolute" 는 설계 원안. GOES-16 이후 자료는 조용한 시간 바닥값이
+    약 1 pfu 라 (2021-10-28 사건 전 중앙값 0.97, 40% 시간이 1 pfu 이상)
+    이 조건이 그 구간에서 변별력이 없다.
+    mode="relative" 는 ≥pfu 이면서 앞선 background_min 중앙값의 ratio 배 이상.
+    어느 쪽을 쓸지는 검증집합까지만 보고 정한다.
+    """
+    p = df["p_gt10"].astype(float)
+    cond = p >= pfu
+    if mode == "relative":
+        nb = max(4, int(round(background_min / cadence)))
+        bg = p.rolling(nb, min_periods=max(3, nb // 4)).median().shift(nb)
+        cond = cond & (p >= ratio * bg)
+    return _sustained(cond, minutes, cadence)
 
 
 def s1_reached(df: pd.DataFrame, **_) -> pd.Series:
@@ -105,10 +126,13 @@ def rule_gate(df: pd.DataFrame, cadence: int = 5, gate: dict | None = None) -> p
     b = _recent(electron_only(df, cadence, g.get("electron_ratio", 10.0),
                               g.get("electron_sustain_min", 5),
                               g.get("electron_background_min", 60),
-                              channel=g.get("electron_channel", ELECTRON_GATE_CH)),
+                              channel=g.get("electron_channel", ELECTRON_GATE_CH),
+                              background_lag_min=g.get("electron_background_lag_min", 0)),
                 w, cadence).astype(int)
     c = _recent(proton_rise(df, cadence, g.get("proton_pfu", EVENT_ENTRY_PFU),
-                            g.get("proton_sustain_min", 3)), w, cadence).astype(int)
+                            g.get("proton_sustain_min", 3),
+                            mode=g.get("proton_mode", "absolute"),
+                            ratio=g.get("proton_ratio", 3.0)), w, cadence).astype(int)
     need = 2 if g.get("two_of_n", True) else 1
     return (a + b + c) >= need
 
@@ -119,10 +143,13 @@ def rule_gate_no_xray(df: pd.DataFrame, cadence: int = 5, gate: dict | None = No
     w = float(g.get("agree_window_min", 60))
     b = _recent(electron_only(df, cadence, g.get("electron_ratio", 10.0),
                               g.get("electron_sustain_min", 5),
-                              channel=g.get("electron_channel", ELECTRON_GATE_CH)),
+                              channel=g.get("electron_channel", ELECTRON_GATE_CH),
+                              background_lag_min=g.get("electron_background_lag_min", 0)),
                 w, cadence).astype(int)
     c = _recent(proton_rise(df, cadence, g.get("proton_pfu", EVENT_ENTRY_PFU),
-                            g.get("proton_sustain_min", 3)), w, cadence).astype(int)
+                            g.get("proton_sustain_min", 3),
+                            mode=g.get("proton_mode", "absolute"),
+                            ratio=g.get("proton_ratio", 3.0)), w, cadence).astype(int)
     return (b + c) >= 2
 
 
