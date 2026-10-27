@@ -114,10 +114,25 @@ def get(url: str, timeout: int = 60) -> bytes:
 HREF = re.compile(rb'href="([^"?][^"]*)"', re.I)
 
 
+_LISTING: dict[str, bytes | None] = {}
+
+
 def list_dir(url: str, dirs: bool = False, quiet: bool = False) -> list[str]:
-    """디렉터리 목록에서 이름을 뽑는다. dirs=True 면 하위 폴더만."""
+    """디렉터리 목록에서 이름을 뽑는다. dirs=True 면 하위 폴더만.
+
+    폴더는 월 단위라 날짜마다 같은 목록을 다시 받게 된다. 한 번 받은 목록은
+    기억해 둔다 (전 기간이면 목록 요청이 약 1만 5천 번에서 수백 번으로 준다).
+    """
     try:
-        html = get(url)
+        if url not in _LISTING:
+            try:
+                _LISTING[url] = get(url)
+            except Exception:
+                _LISTING[url] = None
+                raise
+        html = _LISTING[url]
+        if html is None:
+            raise OSError("이전에 실패한 목록")
     except Exception as e:                                   # noqa: BLE001
         if not quiet:
             print(f"  ! 디렉터리를 못 열었다: {url}\n    {e}")
