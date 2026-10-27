@@ -137,7 +137,7 @@ def read_xrs_nc(path: Path) -> pd.DataFrame | None:
     with _open_nc(path) as ds:
         if "xrsb_flux" not in ds.variables:
             return None
-        idx = pd.to_datetime(ds["time"].values, utc=True)
+        idx = _nc_time(ds)
         out = pd.DataFrame(index=idx)
         for var, name, flag in (("xrsb_flux", "xrs_long", "xrsb_flag"),
                                 ("xrsa_flux", "xrs_short", "xrsa_flag")):
@@ -155,7 +155,7 @@ def read_mpsh_nc(path: Path) -> pd.DataFrame | None:
     with _open_nc(path) as ds:
         if "AvgIntElectronFlux" not in ds.variables:
             return None
-        idx = pd.to_datetime(ds["time"].values, utc=True)
+        idx = _nc_time(ds)
         out = pd.DataFrame(index=idx)
         v = np.asarray(ds["AvgIntElectronFlux"].values, dtype="float64")
         out["e_gt2"] = np.nanmax(v, axis=1) if v.ndim > 1 else v   # E11 >2 MeV
@@ -180,53 +180,132 @@ def read_mpsh_nc(path: Path) -> pd.DataFrame | None:
         return out
 
 
-def read_sgps_nc(path: Path) -> pd.DataFrame | None:
-    """SGPS 양성자 (GOES-16 이후, 2020년~).
+#: 적분 양성자 임계 에너지 (MeV) → 공통 이름
+SGPS_THRESHOLDS = {1: "p_gt1", 5: "p_gt5", 10: "p_gt10", 30: "p_gt30",
+                   50: "p_gt50", 60: "p_gt60", 100: "p_gt100"}
+_J2000 = pd.Timestamp("2000-01-01 12:00:00", tz="UTC")
 
-    적분 채널 변수명이 세대·버전마다 달라서 이름을 추측하지 않는다.
-    'Int' 와 'Proton' 이 들어간 변수를 찾고, 임계 에너지 좌표로 열을 맞춘다.
-    못 찾으면 무엇이 들어 있는지 알려주고 비운다.
+
+def _nc_time(ds) -> pd.DatetimeIndex:
+    """시간 변수를 찾아 UTC 로. 제품마다 이름이 다르다 (time / L2_SciData_TimeStamp).
+
+    xarray 가 단위를 풀었으면 datetime 으로 오고, 못 풀었으면 J2000 기준 초다.
     """
-    want = {1: "p_gt1", 5: "p_gt5", 10: "p_gt10", 30: "p_gt30",
-            50: "p_gt50", 60: "p_gt60", 100: "p_gt100", 500: "p_gt500"}
-    with _open_nc(path) as ds:
-        idx = pd.to_datetime(ds["time"].values, utc=True)
-        cand = [v for v in ds.variables
-                if "int" in v.lower() and "proton" in v.lower()
-                and "flux" in v.lower() and "uncert" not in v.lower()]
-        if not cand:
-            print(f"  ! {Path(path).name}: 적분 양성자 변수를 못 찾았다.")
-            print(f"    들어 있는 변수: {', '.join(list(ds.variables)[:25])}")
-            return None
-        var = sorted(cand, key=len)[0]
-        arr = np.asarray(ds[var].values, dtype="float64")
-        if arr.ndim == 3:                       # (time, telescopes, chans)
-            arr = np.nanmax(arr, axis=1)
-        if arr.ndim != 2:
-            print(f"  ! {Path(path).name}: {var} 모양이 예상과 다르다 {arr.shape}")
-            return None
+    name = next((v for v in ("time", "L2_SciData_TimeStamp") if v in ds.variables), None)
+    if name is None:
+        raise KeyError(f"시간 변수가 없다: {list(ds.variables)[:10]}")
+    v = ds[name].values
+    if np.issubdtype(v.dtype, np.datetime64):
+        return pd.to_datetime(v, utc=True)
+    return _J2000 + pd.to_timedelta(np.asarray(v, dtype="float64"), unit="s")
 
-        thr = None
-        for v in ds.variables:                  # 임계 에너지 좌표 찾기
-            if "int" in v.lower() and "energ" in v.lower():
-                t = np.asarray(ds[v].values, dtype="float64")
-                t = np.nanmean(t, axis=0) if t.ndim > 1 else t
-                if t.shape[-1] == arr.shape[-1]:
-                    thr = t / 1000.0 if np.nanmax(t) > 2000 else t   # keV→MeV
-                    break
-        out = pd.DataFrame(index=idx)
-        if thr is None:
-            print(f"  ! {Path(path).name}: {var} 의 임계 에너지 좌표를 못 찾았다. "
-                  f"채널 수 {arr.shape[-1]}")
+
+def integrate_spectrum(diff, e_eff_kev, thresholds_mev, e_top_mev=500.0, n_grid=400):
+    """미분 플럭스(/keV) → 임계 에너지 이상 적분 플럭스(pfu).
+
+    채널 유효 에너지 사이를 로그-로그 직선(국소 멱법칙)으로 잇고 e_top 까지
+    적분한다. 채널이 겹치거나 사이가 비어 있어도 같은 방식으로 처리된다.
+    e_top 이상은 따로 재는 적분 채널을 더해야 한다.
+
+    diff : (n_rec, n_ch)   e_eff_kev : (n_ch,)
+    """
+    diff = np.asarray(diff, dtype="float64")
+    e = np.asarray(e_eff_kev, dtype="float64")
+    order = np.argsort(e)
+    e, diff = e[order], diff[:, order]
+    thr = np.asarray(sorted(thresholds_mev), dtype="float64") * 1000.0
+    grid = np.logspace(np.log10(thr.min()), np.log10(e_top_mev * 1000.0), n_grid)
+    lg, le = np.log(grid), np.log(e)
+    out = np.full((diff.shape[0], thr.size), np.nan)
+    for r in range(diff.shape[0]):
+        ok = np.isfinite(diff[r]) & (diff[r] > 0)
+        if ok.sum() < 2:
+            continue
+        x, y = le[ok], np.log(diff[r, ok])
+        # 채널 범위 밖은 평평하게 두지 않고 양 끝 기울기로 연장한다.
+        # 평평하게 두면 1 MeV 는 최대 30% 작게, 100 MeV 는 6% 크게 나온다.
+        lo_s = (y[1] - y[0]) / (x[1] - x[0])
+        hi_s = (y[-1] - y[-2]) / (x[-1] - x[-2])
+        if lg[0] < x[0]:
+            x, y = np.r_[lg[0], x], np.r_[y[0] + lo_s * (lg[0] - x[0]), y]
+        if lg[-1] > x[-1]:
+            x, y = np.r_[x, lg[-1]], np.r_[y, y[-1] + hi_s * (lg[-1] - x[-1])]
+        j = np.exp(np.interp(lg, x, y))
+        seg = 0.5 * (j[1:] + j[:-1]) * np.diff(grid)          # 사다리꼴, keV × /keV
+        tail = np.concatenate([np.cumsum(seg[::-1])[::-1], [0.0]])
+        out[r] = np.interp(thr, grid, tail)
+    return out
+
+
+def read_sgps_nc(path: Path) -> pd.DataFrame | None:
+    """SGPS 양성자 (GOES-16 이후, 2020년부터).
+
+    이 제품에는 ≥1·5·10·…·100 MeV 적분 플럭스가 **없다**. 13개 미분 채널과
+    >500 MeV 적분 채널 하나뿐이다 (2021-10-28 파일로 확인). 그래서 미분
+    스펙트럼을 적분해 만든다. ≥10 MeV 가 라벨 채널이므로 이 계산이 틀리면
+    2020년 이후 사건이 통째로 틀린다. scripts/check_probe.py 로 확인할 것.
+
+    센서 두 개(sensor_units)는 EPEAD 의 동·서와 같은 취지로 큰 값을 쓴다.
+    """
+    with _open_nc(path) as ds:
+        need = ("AvgDiffProtonFlux", "DiffProtonEffectiveEnergy")
+        if not all(v in ds.variables for v in need):
+            print(f"  ! {Path(path).name}: 미분 양성자 변수가 없다. "
+                  f"들어 있는 변수: {', '.join(list(ds.variables)[:20])}")
             return None
-        for mev, name in want.items():
-            j = int(np.nanargmin(np.abs(thr - mev)))
-            if abs(thr[j] - mev) / mev < 0.25:   # 25% 안에 맞는 채널만
-                out[name] = arr[:, j]
-        return out if len(out.columns) else None
+        idx = _nc_time(ds)
+        diff = np.asarray(ds["AvgDiffProtonFlux"].values, dtype="float64")   # (rec, unit, ch)
+        eeff = np.asarray(ds["DiffProtonEffectiveEnergy"].values, dtype="float64")
+        if diff.ndim == 2:
+            diff = diff[:, None, :]
+        if eeff.ndim == 1:
+            eeff = np.broadcast_to(eeff, (diff.shape[1], eeff.size))
+        p11 = (np.asarray(ds["AvgIntProtonFlux"].values, dtype="float64")
+               if "AvgIntProtonFlux" in ds.variables else None)
+        if p11 is not None and p11.ndim == 1:
+            p11 = p11[:, None]
+
+        e_top = 500.0
+        if "IntegralProtonEffectiveEnergy" in ds.variables:
+            ie = np.asarray(ds["IntegralProtonEffectiveEnergy"].values, dtype="float64")
+            e_top = float(np.nanmean(ie)) / 1000.0 if np.nanmax(ie) > 2000 else float(np.nanmean(ie))
+
+        thr = sorted(SGPS_THRESHOLDS)
+        per_unit = []
+        for u in range(diff.shape[1]):
+            J = integrate_spectrum(diff[:, u, :], eeff[u], thr, e_top)
+            if p11 is not None:
+                J = J + np.nan_to_num(p11[:, [u]], nan=0.0)
+            per_unit.append(J)
+        J = np.nanmax(np.stack(per_unit), axis=0)
+
+        out = pd.DataFrame(J, index=idx, columns=[SGPS_THRESHOLDS[t] for t in thr])
+        if p11 is not None:
+            out["p_gt500"] = np.nanmax(p11, axis=1)
+        return out
 
 
 _DATE_IN_NAME = re.compile(r"_d(\d{8})")
+_SAT_IN_NAME = re.compile(r"(?:^|_)g(\d{2})_")
+_YEAR_IN_NAME = re.compile(r"(?:_d|_)((?:19|20)\d{2})\d{4}")
+
+
+def policy_satellite(year: int) -> int:
+    """연도별로 쓸 위성. scripts/fetch_data.py 의 satellite() 와 같아야 한다."""
+    return 15 if year <= 2019 else (16 if year <= 2022 else 18)
+
+
+def _policy_rank(path: Path) -> int:
+    """같은 시각을 두 위성이 다 재고 있으면 정책 위성 파일을 먼저 읽게 한다.
+
+    병합은 시각별 첫 유효값을 쓰므로 먼저 읽은 쪽이 남는다. 이름순으로만
+    두면 폴더 이름에 따라 위성이 섞인다.
+    """
+    n = Path(path).name.lower()
+    ms, my = _SAT_IN_NAME.search(n), _YEAR_IN_NAME.search(n)
+    if not (ms and my):
+        return 1
+    return 0 if int(ms.group(1)) == policy_satellite(int(my.group(1))) else 2
 
 
 def _check_dates(path: Path, d: pd.DataFrame | None) -> pd.DataFrame | None:
@@ -315,7 +394,8 @@ def add_xray_flag(df: pd.DataFrame, eclipse: np.ndarray | None = None) -> pd.Dat
 def build_dataset(src_dir: Path, out_path: Path, cadence_min: int = 5) -> pd.DataFrame:
     """raw 폴더를 전부 읽어 processed 표 하나로."""
     src = Path(src_dir)
-    files = sorted(p for p in src.rglob("*") if p.suffix in (".nc", ".csv"))
+    files = sorted((p for p in src.rglob("*") if p.suffix in (".nc", ".csv")),
+                   key=lambda p: (_policy_rank(p), p.name))
     parts: list[pd.DataFrame] = []
     used, skipped = [], []
     for p in files:

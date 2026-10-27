@@ -130,3 +130,36 @@ def test_early_continuous_warning_keeps_its_lead_without_false_alarm():
     m = event_metrics(a, [(idx[300], idx[310])])
     assert m["leads_min"] == [57.0]
     assert m["n_false"] == 0
+
+
+def test_sgps_integral_matches_power_law():
+    """SGPS 에는 ≥10 MeV 적분이 없어 미분 채널을 적분해 만든다. 해석해와 비교."""
+    from oracle.ingest import integrate_spectrum
+    e = np.array([1380, 2090, 2780, 4700, 8020, 16460, 31420, 54500,
+                  90800, 108500, 126100, 196600, 333400.])
+    thr = [1, 5, 10, 30, 50, 60, 100]
+    for g in (2.0, 3.0, 4.0):
+        got = integrate_spectrum((1e6 * e ** -g)[None, :], e, thr, 500.0)[0]
+        E = np.array(thr) * 1000.0
+        exact = 1e6 / (g - 1) * (E ** (1 - g) - 500e3 ** (1 - g))
+        assert np.allclose(got, exact, rtol=0.01)
+
+
+def test_nc_time_decodes_j2000_seconds():
+    from oracle.ingest import _nc_time
+
+    class V:
+        def __init__(self, v): self.values = v
+    ds = type("D", (), {})()
+    ds.variables = {"L2_SciData_TimeStamp": None}
+    secs = (pd.Timestamp("2021-10-28", tz="UTC") - pd.Timestamp("2000-01-01 12:00", tz="UTC")).total_seconds()
+    ds.__class__.__getitem__ = lambda self, k: V(np.array([secs, secs + 300.0]))
+    t = _nc_time(ds)
+    assert t[0] == pd.Timestamp("2021-10-28", tz="UTC")
+
+
+def test_policy_satellite_file_is_read_first():
+    from oracle.ingest import _policy_rank
+    assert _policy_rank(Path("g15_epead_e13ew_5m_20170901_20170930.csv")) == 0
+    assert _policy_rank(Path("sci_mpsh-l2-avg5m_g16_d20170910_v2-0-3.nc")) == 2
+    assert _policy_rank(Path("sci_sgps-l2-avg5m_g16_d20211028_v2-0-0.nc")) == 0

@@ -70,12 +70,41 @@ M1급 = `xrs_long` ≥ 1×10⁻⁵ W/m².
 
 ### 2020 ~ 2026 - GOES-16/18 SGPS netCDF
 
-파일: `sgps-l2-avg5m/{YYYY}/{MM}/` 아래
+파일: `sci_sgps-l2-avg5m_g{NN}_d{YYYYMMDD}_*.nc` (2021-10-28 파일로 확인)
 
-**아직 확인하지 못했다.** 변수명을 추측해 적지 않는다.
-`ingest.read_sgps_nc()` 가 'Int' + 'Proton' + 'Flux' 가 들어간 변수를 찾고
-임계 에너지 좌표로 채널을 맞추도록 되어 있다. 못 찾으면 무엇이 들어 있는지
-출력한다. 2021-10-28 자료를 받아 확인하고 이 칸을 채울 것.
+**이 제품에는 ≥1·5·10·30·50·60·100 MeV 적분 플럭스가 없다.** 들어 있는 것은
+
+| 변수 | 모양 | 뜻 |
+|---|---|---|
+| `AvgDiffProtonFlux` | (record, sensor_units 2, diff_channels 13) | 미분 플럭스, protons/(cm² sr keV s) |
+| `DiffProtonEffectiveEnergy` | (sensor_units, diff_channels) | 채널 유효 에너지, keV |
+| `DiffProtonLowerEnergy` / `UpperEnergy` | 같음 | 채널 경계, keV |
+| `AvgIntProtonFlux` | (record, sensor_units) | **>500 MeV 적분 하나** (P11) |
+| `L2_SciData_TimeStamp` | (record,) | 시각. 변수 이름이 `time` 이 아니다 |
+
+그래서 ≥E 적분은 미분 채널로 만든다 (`ingest.integrate_spectrum`).
+
+1. 채널 유효 에너지 사이를 로그-로그 직선(국소 멱법칙)으로 잇는다
+2. 채널 범위 밖은 양 끝 기울기로 연장한다
+3. E 부터 500 MeV 까지 적분하고 >500 MeV 채널을 더한다
+4. 센서 두 개 중 큰 값을 쓴다 (EPEAD 동·서와 같은 취지)
+
+멱지수 2·3·4 의 해석해와 비교해 모든 임계값에서 오차 0.1% 이내다.
+**≥10 MeV 가 라벨 채널이므로 실제 사건으로도 확인해야 한다.**
+`python scripts/check_probe.py` 가 2021-10-28 사건(S1)의 값을 보여준다.
+
+이 계산은 NOAA 운용 적분값과 같은 알고리즘이 아니다. 같은 사건에서 SWPC 가
+발표한 값과 비교한 차이를 실험 기록에 남긴다.
+
+| 공통 이름 | 원본 |
+|---|---|
+| `p_gt1` ~ `p_gt100` | 미분 채널 적분 + P11 |
+| `p_gt500` | `AvgIntProtonFlux` (센서 두 개 중 큰 값) |
+
+### 같은 시각을 두 위성이 다 재고 있으면
+
+연도별 정책 위성(2019년까지 GOES-15, 2020~2022 GOES-16, 2023~ GOES-18) 파일을
+먼저 읽는다. 병합은 시각별 첫 유효값을 쓰므로 정책 위성 값이 남는다.
 
 ---
 
