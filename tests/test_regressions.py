@@ -180,3 +180,16 @@ def test_ace_hapi_reads_header_and_fill():
     assert list(d.columns) == ["e_dif_lo", "e_dif_hi"]
     assert np.isnan(d["e_dif_lo"].iloc[1]) and d["e_dif_hi"].iloc[1] == 3.4
     assert d.index[0] == pd.Timestamp("2017-09-10", tz="UTC")
+
+
+def test_absent_channel_is_nan_so_harmonize_and_gate_skip_it():
+    """없는 채널을 0 으로 채워서 정합을 통과하고 전자 게이트가 빈 채널을 고르던 버그."""
+    from oracle.channels import fill_missing
+    idx = pd.date_range("2015-01-01", periods=100, freq="5min", tz="UTC")
+    df = fill_missing(pd.DataFrame({"p_gt10": 1.0, "e_gt2": 5.0}, index=idx))
+    assert df["e_dif_hi"].isna().all() and (df["e_dif_hi_ok"] == 0).all()
+    m = np.ones(len(df), bool)
+    keep, _ = harmonize(df, ["p_gt10", "e_gt2", "e_dif_hi", "dose_main", "xray_ok"],
+                        {"a": m}, 0.8, verbose=False)
+    assert "e_dif_hi" not in keep and "dose_main" not in keep
+    assert baselines.pick_electron_channel(df, {"a": m}) == "e_gt2"

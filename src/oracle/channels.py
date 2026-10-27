@@ -67,15 +67,16 @@ def require_columns(df, cols=None):
 
 
 def fill_missing(df, cols=None):
-    """없는 채널은 0 으로 채우고 `<채널>_ok` = 0 으로 표시한다.
+    """없는 채널은 결측(NaN) 열로 만들고 `<채널>_ok` = 0 으로 표시한다.
 
-    지구 근처 자료에는 선량률 2채널이 없다. 없는 것을 있는 척하지 않고
-    플래그로 남겨 학습·보고에서 구분한다.
+    0 으로 채우면 안 된다. 0 은 '관측했더니 0' 으로 읽혀서 채널 정합이 그 채널을
+    100% 관측된 것으로 보고, 전자 게이트가 값이 전부 0 인 채널을 고르게 된다.
     """
+    import numpy as np
     cols = cols or ALL_COLUMNS
     for c in cols:
         if c not in df.columns:
-            df[c] = 0.0
+            df[c] = np.nan
             df[c + "_ok"] = 0
         elif c + "_ok" not in df.columns and c in DOSE:
             df[c + "_ok"] = (~df[c].isna()).astype("int8")

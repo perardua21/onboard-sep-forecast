@@ -208,9 +208,50 @@ def download(url: str, dest: Path) -> dict | None:
 # ACE/EPAM 준상대론적 전자. 태양풍 속(L1)에서 재므로 정지궤도 방사선대 전자와 섞이지 않는다.
 # CDAWeb HAPI 가 CSV 로 바로 준다. include=header 로 받으면 변수 이름·단위·결측값이
 # 머리말(#)에 같이 오므로 열 이름을 추측하지 않는다.
-ACE_HAPI = "https://cdaweb.gsfc.nasa.gov/hapi/data"
+ACE_HAPI = "https://cdaweb.gsfc.nasa.gov/hapi"
 ACE_DATASET = "AC_H1_EPM"                      # 5분 level 2
-ACE_PARAMS = ("DE1", "DE2", "DE3", "DE4")      # 0.038–0.053 / –0.103 / –0.175 / 0.175–0.315 MeV
+#: 원하는 채널. 서버의 실제 변수 이름은 info 로 물어서 맞춘다.
+ACE_WANT = ("DE3", "DE4")                      # 0.103–0.175 / 0.175–0.315 MeV
+_ACE_PARAMS: list | None = None
+
+
+def _http_error_body(e) -> str:
+    try:
+        return e.read().decode("utf-8", "replace")[:600]
+    except Exception:                                        # noqa: BLE001
+        return ""
+
+
+def ace_params() -> list:
+    """HAPI info 로 AC_H1_EPM 의 변수 목록을 받아 DE3·DE4 에 해당하는 이름을 고른다."""
+    global _ACE_PARAMS
+    if _ACE_PARAMS is not None:
+        return _ACE_PARAMS
+    names = []
+    for u in (f"{ACE_HAPI}/info?id={ACE_DATASET}", f"{ACE_HAPI}/info?dataset={ACE_DATASET}"):
+        try:
+            meta = json.loads(get(u, timeout=60).decode("utf-8", "replace"))
+            names = [p["name"] for p in meta.get("parameters", [])]
+            if names:
+                break
+        except Exception as e:                               # noqa: BLE001
+            body = _http_error_body(e)
+            print(f"  ! ACE info 실패: {e} {body}")
+    if not names:
+        _ACE_PARAMS = list(ACE_WANT)
+        return _ACE_PARAMS
+    pick = []
+    for w in ACE_WANT:
+        exact = [n for n in names if n == w]
+        loose = [n for n in names if n.upper() == w.upper()
+                 or (w.upper() in n.upper() and "UNC" not in n.upper())]
+        if exact or loose:
+            pick.append((exact or loose)[0])
+    if len(pick) < len(ACE_WANT):
+        print(f"  ! ACE 변수 이름을 다 못 찾았다. 서버 변수 목록: {', '.join(names)}")
+    _ACE_PARAMS = pick or list(ACE_WANT)
+    print(f"  · ACE 변수: {', '.join(_ACE_PARAMS)}  (서버 변수 {len(names)}개 중)")
+    return _ACE_PARAMS
 
 
 def fetch_ace_month(y: int, m: int, manifest: list) -> None:
@@ -221,21 +262,22 @@ def fetch_ace_month(y: int, m: int, manifest: list) -> None:
     start = f"{y:04d}-{m:02d}-01T00:00:00Z"
     ny, nm = (y + 1, 1) if m == 12 else (y, m + 1)
     stop = f"{ny:04d}-{nm:02d}-01T00:00:00Z"
-    params = ",".join(ACE_PARAMS)
+    params = ",".join(ace_params())
     urls = [   # HAPI 2.x 이름과 3.x 이름 둘 다 시도
-        f"{ACE_HAPI}?id={ACE_DATASET}&parameters={params}&time.min={start}&time.max={stop}"
+        f"{ACE_HAPI}/data?id={ACE_DATASET}&parameters={params}&time.min={start}&time.max={stop}"
         f"&format=csv&include=header",
-        f"{ACE_HAPI}?dataset={ACE_DATASET}&parameters={params}&start={start}&stop={stop}"
+        f"{ACE_HAPI}/data?dataset={ACE_DATASET}&parameters={params}&start={start}&stop={stop}"
         f"&format=csv&include=header",
     ]
+    errs = []
     for u in urls:
         try:
             blob = get(u, timeout=300)
         except Exception as e:                               # noqa: BLE001
-            last = e
+            errs.append(f"{e} {_http_error_body(e)}".strip())
             continue
         if not blob.strip():
-            last = "빈 응답"
+            errs.append("빈 응답")
             continue
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_bytes(blob)
@@ -244,7 +286,10 @@ def fetch_ace_month(y: int, m: int, manifest: list) -> None:
                          "sha256": hashlib.sha256(blob).hexdigest(), "kind": "ace",
                          "fetched": time.strftime("%Y-%m-%dT%H:%M:%S")})
         return
-    print(f"  ! ACE {y}-{m:02d} 를 못 받았다: {last}")
+    print(f"  ! ACE {y}-{m:02d} 를 못 받았다")
+    for k, e in enumerate(errs, 1):
+        print(f"    시도 {k}: {e}")
+    print(f"    요청 주소: {urls[0]}")
 
 
 def fetch_day(d: date, manifest: list) -> None:

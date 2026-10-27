@@ -356,10 +356,15 @@ def read_ace_hapi(path: Path) -> pd.DataFrame | None:
             d[c] = d[c].where(d[c] != f)
     d = d.apply(pd.to_numeric, errors="coerce")
     out = pd.DataFrame(index=d.index)
-    if "DE3" in d.columns:
-        out["e_dif_lo"] = d["DE3"]
-    if "DE4" in d.columns:
-        out["e_dif_hi"] = d["DE4"]
+    # 서버 변수 이름이 정확히 DE3/DE4 가 아닐 수 있다 (fetch_data 가 info 로 맞춘 이름).
+    lo = next((c for c in d.columns if "DE3" in str(c).upper()), None)
+    hi = next((c for c in d.columns if "DE4" in str(c).upper()), None)
+    if lo is None and hi is None and d.shape[1] == 2:
+        lo, hi = d.columns
+    if lo is not None:
+        out["e_dif_lo"] = d[lo]
+    if hi is not None:
+        out["e_dif_hi"] = d[hi]
     return out if len(out.columns) else None
 
 
