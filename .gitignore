@@ -23,3 +23,5 @@ docs/variable_inventory.txt
 *.docx
 *.pptx
 *.hwp
+outputs/run*/
+outputs/dev*/

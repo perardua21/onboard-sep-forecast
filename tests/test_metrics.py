@@ -171,6 +171,6 @@ def test_verdict_levels():
     base = {"POD": 0.75, "FAR": 0.30, "lead_mean_min": 40.0}
     assert verdict(base, _Cfg())["판정"] == "완전 성공"
     assert verdict({**base, "POD": 0.85}, _Cfg())["판정"] == "확장 성공"
-    assert verdict({**base, "FAR": 0.50}, _Cfg())["판정"] == "최소 성공"
+    assert verdict({**base, "FAR": 0.50}, _Cfg())["판정"] .startswith("최소 성공 (탐지율 기준)")
     assert verdict({**base, "POD": 0.40}, _Cfg())["판정"] == "미달"
-    assert verdict({**base, "lead_mean_min": 10.0}, _Cfg())["판정"] == "최소 성공"
+    assert verdict({**base, "lead_mean_min": 10.0}, _Cfg())["판정"] .startswith("최소 성공 (탐지율 기준)")

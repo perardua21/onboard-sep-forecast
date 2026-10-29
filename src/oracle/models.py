@@ -21,8 +21,7 @@ except Exception:                                      # noqa: BLE001
     HAS_TORCH = False
 
 
-# ───────────────────────────────────────── 임계값
-# ───────────────────────────────────────── 로지스틱 회귀
+# 로지스틱 회귀
 def fit_logreg(X, y, seed: int = 0, C: float = 1.0):
     """선형 기준선. 신경망이 선형보다 나은지를 같은 자료로 확인한다."""
     from sklearn.linear_model import LogisticRegression
@@ -42,7 +41,7 @@ def predict_proba(clf, X) -> np.ndarray:
     return clf.predict_proba(X)[:, 1]
 
 
-# ───────────────────────────────────────── GBT (자료 점검용)
+# GBT (자료 점검용)
 def fit_gbt(X, y, seed: int = 0):
     from sklearn.ensemble import HistGradientBoostingClassifier
     clf = HistGradientBoostingClassifier(
@@ -56,7 +55,7 @@ def fit_gbt(X, y, seed: int = 0):
 predict_gbt = predict_proba
 
 
-# ───────────────────────────────────────── 연산 예산
+# 연산 예산
 def tcn_budget(n_feat: int, hidden: int = 32, n_blocks: int = 4,
                kernel_size: int = 7, n_heads: int = 2,
                window_steps: int = 12, flops_budget_m: float = 20.0) -> dict:
@@ -108,7 +107,7 @@ def resample_interval_s(n_params: int, window_min: int = 60,
     return float("inf") if t <= 0 else window_min * 60.0 / t
 
 
-# ───────────────────────────────────────── TCN / 1D CNN
+# TCN / 1D CNN
 if HAS_TORCH:
     class _Chomp(nn.Module):
         def __init__(self, n): super().__init__(); self.n = n
@@ -164,8 +163,17 @@ if HAS_TORCH:
 
     def fit_nn(X, y, model=None, n_feat=None, cfg=None, lr=2e-3, weight_decay=1e-4,
                epochs=20, batch_size=256, seed=0, device=None,
-               Xva=None, yva=None, verbose=True, kind="tcn"):
-        """y 는 (N,) 또는 (N, n_heads). 여러 horizon 을 한 번에 학습한다."""
+               Xva=None, yva=None, verbose=True, kind="tcn",
+               patience_max=5, pos_weight="sqrt", ema_decay=0.0, cosine=False,
+               snapshot_epochs=()):
+        """y 는 (N,) 또는 (N, n_heads). horizon 여러 개를 한 번에 학습.
+
+        pos_weight: "sqrt" 면 sqrt(음성/양성) (약 60배). "balanced" 는 약 3,400배라
+          손실이 크게 흔들렸다. 확률 값은 학습 뒤 따로 보정한다.
+        ema_decay: 0 보다 크면 가중치 지수이동평균을 최종 가중치로 쓴다.
+        Xva 가 없으면 조기 종료 없이 epochs 만큼 돈다.
+        snapshot_epochs: 이 epoch 들의 가중치를 model.snapshots_ 에 남긴다 (개발 모드).
+        """
         torch.manual_seed(seed); np.random.seed(seed)
         dev = device or ("cuda" if torch.cuda.is_available() else "cpu")
         Y = y if y.ndim == 2 else y[:, None]
@@ -174,12 +182,23 @@ if HAS_TORCH:
         model = model.to(dev)
 
         pos = np.clip(Y.sum(axis=0).astype(float), 1.0, None)
-        w = torch.tensor((len(Y) - pos) / pos, dtype=torch.float32, device=dev)
+        ratio = (len(Y) - pos) / pos
+        if pos_weight == "sqrt":
+            ratio = np.sqrt(ratio)
+        elif pos_weight in (None, "none"):
+            ratio = np.ones_like(ratio)
+        w = torch.tensor(ratio, dtype=torch.float32, device=dev)
         lossf = nn.BCEWithLogitsLoss(pos_weight=w)
         opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
+        steps_total = epochs * max(1, int(np.ceil(len(X) / batch_size)))
+        sched = (torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=steps_total, eta_min=lr * 0.05)
+                 if cosine else None)
+        ema = ({k: v.detach().clone().float() for k, v in model.state_dict().items()}
+               if ema_decay > 0 else None)
         Xt = torch.from_numpy(X); Yt = torch.from_numpy(Y.astype(np.float32))
         n = len(Xt)
-        best_state, best_loss, patience = None, np.inf, 0
+        best_state, best_loss, patience, best_epoch = None, np.inf, 0, epochs
+        snaps, want = {}, set(int(e) for e in snapshot_epochs)
         for ep in range(epochs):
             model.train()
             perm = torch.randperm(n); tot = 0.0
@@ -191,28 +210,49 @@ if HAS_TORCH:
                 loss.backward()
                 nn.utils.clip_grad_norm_(model.parameters(), 1.0)
                 opt.step()
-                tot += float(loss) * len(sl)
+                if sched is not None:
+                    sched.step()
+                if ema is not None:
+                    with torch.no_grad():
+                        for k, v in model.state_dict().items():
+                            if v.dtype.is_floating_point:
+                                ema[k].mul_(ema_decay).add_(v.detach().float(), alpha=1 - ema_decay)
+                            else:
+                                ema[k].copy_(v)
+                tot += loss.item() * len(sl)
+            if ep + 1 in want:
+                src = ema if ema is not None else model.state_dict()
+                snaps[ep + 1] = {k: v.detach().clone() for k, v in src.items()}
             msg = f"  epoch {ep+1}/{epochs}  train={tot/n:.4f}"
             if Xva is not None and len(Xva):
                 Yv = yva if yva.ndim == 2 else yva[:, None]
                 model.eval()
                 with torch.no_grad():
-                    vl = float(lossf(model(torch.from_numpy(Xva).to(dev)),
-                                     torch.from_numpy(Yv.astype(np.float32)).to(dev)))
+                    vl = 0.0
+                    for i in range(0, len(Xva), 8192):
+                        xb = torch.from_numpy(Xva[i:i + 8192]).to(dev)
+                        yb = torch.from_numpy(Yv[i:i + 8192].astype(np.float32)).to(dev)
+                        vl += lossf(model(xb), yb).item() * len(xb)
+                    vl /= len(Xva)
                 msg += f"  valid={vl:.4f}"
                 if vl < best_loss - 1e-4:
-                    best_loss, patience, best_state = vl, 0, {
+                    best_loss, patience, best_epoch = vl, 0, ep + 1
+                    best_state = {
                         k: v.detach().clone() for k, v in model.state_dict().items()}
                 else:
                     patience += 1
             if verbose:
                 print(msg)
-            if patience >= 3:
+            if patience >= patience_max:
                 if verbose:
                     print("  early stopping")
                 break
         if best_state is not None:
             model.load_state_dict(best_state)
+        elif ema is not None:
+            model.load_state_dict(ema)
+        model.best_epoch_ = best_epoch
+        model.snapshots_ = snaps
         return model.eval()
 
     @torch.no_grad()

@@ -86,7 +86,7 @@ def main():
 
     section("3. 같은 시각 두 기기 비교 (2017-09-10)")
     pairs = [
-        ("X선 1–8 Å", "xrs_long",
+        ("X선 1-8 Å", "xrs_long",
          find("*xrsf*_g15_d20170910*.nc"), ingest.read_xrs_nc,
          find("*xrsf*_g16_d20170910*.nc"), ingest.read_xrs_nc),
         ("전자 >2 MeV", "e_gt2",
@@ -110,7 +110,7 @@ def main():
               f"(10~90% {r.quantile(.1):.3g}~{r.quantile(.9):.3g})  로그 상관 {c:.2f}  n={len(j)}")
     print("  (비가 1 에서 멀면 기기 간 눈금 차이다. 상관이 높으면 모양은 같다)")
 
-    section("4. ACE 전자(0.175–0.315 MeV)가 양성자보다 먼저 오르는가")
+    section("4. ACE 전자(0.175-0.315 MeV)가 양성자보다 먼저 오르는가")
     if "e_dif_hi" not in df.columns or df["e_dif_hi"].notna().sum() == 0:
         print("  ACE 자료가 없다. python scripts\\fetch_data.py --probe 를 먼저 돌릴 것")
     else:

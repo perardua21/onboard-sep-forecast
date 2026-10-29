@@ -62,7 +62,7 @@ def test_add_xray_flag_marks_missing():
 
 
 def test_locked_split_boundaries():
-    """운용 요구: 학습 2010–2019 / 검증 2020–2022 / 잠금 시험 2023–2026-10-22"""
+    """운용 요구: 학습 2010-2019 / 검증 2020-2022 / 잠금 시험 2023-2026-10-22"""
     idx = pd.date_range("2009-01-01", "2026-12-31", freq="30D", tz="UTC")
     tr, va, te = time_split(idx, "2019-12-31", "2022-12-31",
                             "2010-01-01", "2026-10-22")
@@ -79,3 +79,13 @@ def test_split_report_names_ranges():
     tr, va, te = time_split(idx, "2019-12-31", "2022-12-31", "2010-01-01", "2026-10-22")
     r = split_report(idx, tr, va, te)
     assert "학습" in r and "잠금 시험" in r and "2023" in r["잠금 시험"]
+
+
+def test_split_end_dates_include_whole_day():
+    idx = pd.date_range("2019-12-30", "2023-01-02", freq="5min", tz="UTC")
+    tr, va, te = time_split(idx, "2019-12-31", "2022-12-31", "2010-01-01", "2023-01-01")
+    assert idx[tr].max() == pd.Timestamp("2019-12-31 23:55", tz="UTC")
+    assert idx[va].min() == pd.Timestamp("2020-01-01 00:00", tz="UTC")
+    assert idx[va].max() == pd.Timestamp("2022-12-31 23:55", tz="UTC")
+    assert idx[te].min() == pd.Timestamp("2023-01-01 00:00", tz="UTC")
+    assert idx[te].max() == pd.Timestamp("2023-01-01 23:55", tz="UTC")

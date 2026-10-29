@@ -18,10 +18,11 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from. import baselines, delivery, plots
+from . import baselines, delivery, plots
 from .channels import CHANNEL_SETS, ELECTRON, model_input
+from .datasets import end_bound
 from .evaluate import (block_bootstrap, brier_score, brier_skill_score,
-                       event_metrics, fmt_row, reliability, verdict)
+                       event_metrics, fmt_row, reliability, threshold_curve, verdict)
 from .features import mask_channels, mask_xray
 from .labeling import events_to_frame
 from .predict import to_alarm, persist_minutes
@@ -42,13 +43,9 @@ EXP_DOC = {
 
 # 공통
 def _test_events(events, cfg):
-    t2 = pd.Timestamp(cfg.get("split.valid_end"), tz="UTC")
-    t3 = cfg.get("split.test_end")
-    out = [e for e in events if e[0] > t2]
-    if t3:
-        t3 = pd.Timestamp(t3, tz="UTC")
-        out = [e for e in out if e[0] <= t3]
-    return out
+    b2 = end_bound(cfg.get("split.valid_end"))
+    b3 = end_bound(cfg.get("split.test_end"))
+    return [e for e in events if e[0] >= b2 and (b3 is None or e[0] < b3)]
 
 
 def _metrics(alarm, events, ong, index, cfg, te_mask, min_lead=0.0, horizon_min=None):
@@ -95,7 +92,7 @@ def _show(title: str, rows):
 
 # 본체
 def run_all(df: pd.DataFrame, cfg, out_dir: Path, kind: str | None = None,
-            event_date: str | None = None) -> dict:
+            event_date: str | None = None, ablation: bool = True) -> dict:
     out_dir = Path(out_dir)
     met, fig = out_dir / "metrics", out_dir / "figures"
     met.mkdir(parents=True, exist_ok=True)
@@ -142,6 +139,16 @@ def run_all(df: pd.DataFrame, cfg, out_dir: Path, kind: str | None = None,
         m = _metrics(a, events, ong, index, cfg, te)
         rows.append(fmt_row(baselines.LABELS[key], m, EXP_DOC["EXP-02"]
                             if "only" in key or "rise" in key else ""))
+        if key in ("proton_rise", "rule_gate") and gate.get("proton_mode", "absolute") != "relative":
+            # 비교용 행. 설계값은 그대로 absolute
+            g2 = {**gate, "proton_mode": "relative"}
+            r = float(gate.get("proton_ratio", 3.0))
+            a2 = (baselines.rule_gate(df, cadence=cad, gate=g2) if key == "rule_gate"
+                  else baselines.proton_rise(df, cadence=cad, mode="relative", ratio=r))
+            m2 = _metrics(a2, events, ong, index, cfg, te)
+            name = (f"OBC 규칙 게이트 (양성자 배경 대비 {r:g}배)" if key == "rule_gate"
+                    else f"단순 임계값 - 양성자 배경 대비 {r:g}배")
+            rows.append(fmt_row(name, m2, "비교용. 설계 원안이 아님"))
 
     # 로지스틱 회귀
     probs_by_kind = {}
@@ -167,16 +174,19 @@ def run_all(df: pd.DataFrame, cfg, out_dir: Path, kind: str | None = None,
 
     # 표 2 제거 실험
     rows2 = []
-    for name in ("fused17", "no_dose", "no_proton", "xray_only", "electron_only"):
+    for name in (("fused17", "no_dose", "no_proton", "xray_only", "electron_only")
+                 if ablation else ()):
         try:
             tt = t if name == cfg.get("channels.set", "fused17") else \
-                train(df, cfg, channels=model_input(name), kind=kind, verbose=False)
+                train(df, cfg, channels=model_input(name), kind=kind, verbose=False,
+                      select_on=str(cfg.get("threshold.ablation_select_on", "cv")))
             aa = _model_alarm(tt.prob[tt.primary], index, tt.threshold, cfg)
             mm = _metrics(aa, events, ong, index, cfg, te)
             used = [c for c in tt.info.get("channels", [])
                     if not c.endswith("_ok") and c != "xray_ok"]
+            where = tt.info["threshold_info"][tt.primary].get("where", "-")
             rows2.append(fmt_row(f"{name} ({len(used)}/{len(CHANNEL_SETS[name])}채널)", mm,
-                                 "실제 사용: " + ", ".join(used)))
+                                 f"임계값 {where} · 입력: " + ", ".join(used)))
         except Exception as e:                               # noqa: BLE001
             print(f"  제거 실험 {name} 생략: {e}")
     if rows2:
@@ -188,7 +198,7 @@ def run_all(df: pd.DataFrame, cfg, out_dir: Path, kind: str | None = None,
     for h in t.horizons:
         a = _model_alarm(t.prob[h], index, t.thresholds[h], cfg)
         m = _metrics(a, events, ong, index, cfg, te, horizon_min=h)
-        rows3.append(fmt_row(f"{h}분 출력", m, f"임계값 {t.thresholds[h]:.3f}"))
+        rows3.append(fmt_row(f"{h}분 출력", m, f"임계값 {t.thresholds[h]:.4g}"))
     out["t3_horizon"] = _show("표 3  예측 범위", rows3).to_dict("records")
     _save(pd.DataFrame(rows3), met / "t3_horizon.csv")
 
@@ -228,7 +238,11 @@ def run_all(df: pd.DataFrame, cfg, out_dir: Path, kind: str | None = None,
              {"지표": "Brier 기술점수 (기후값 대비)",
               "값": f"{brier_skill_score(t.prob[H], Y[H], valid):.3f}"},
              {"지표": "평가 표본 수", "값": f"{int(valid.sum()):,}"},
-             {"지표": "양성 비율", "값": f"{Y[H][valid].mean():.4%}" if valid.any() else "-"}]
+             {"지표": "양성 비율", "값": f"{Y[H][valid].mean():.4%}" if valid.any() else "-"},
+             {"지표": "평균 예측확률", "값": f"{np.nanmean(t.prob[H][valid]):.4%}" if valid.any() else "-"},
+             {"지표": "확률 보정", "값": (f"Platt a={t.calib[H][0]:.3f}, b={t.calib[H][1]:.3f} "
+                                       f"({t.info['threshold_info'][H].get('where', '-')} 예측으로 맞춤)")
+                                      if t.calib.get(H) else "없음"}]
     out["t5_probability"] = _show("표 5  확률 품질", rows5).to_dict("records")
     _save(pd.DataFrame(rows5), met / "t5_probability.csv")
     _save(rel, met / "reliability.csv")
@@ -238,7 +252,7 @@ def run_all(df: pd.DataFrame, cfg, out_dir: Path, kind: str | None = None,
     lo, hi = b_ai.get("POD_ci", (float("nan"),) * 2)
     rows6 = [{"항목": k, "결과": x} for k, x in v.items()]
     rows6.append({"항목": f"탐지율 95% 신뢰구간 ({b_ai.get('mode','event')} 블록)",
-                  "결과": f"{lo*100:.0f}–{hi*100:.0f}%" if lo == lo else "-"})
+                  "결과": f"{lo*100:.0f}-{hi*100:.0f}%" if lo == lo else "-"})
     rows6.append({"항목": "선행시간 하위 10백분위",
                   "결과": f"{m_ai['lead_p10_min']:.0f}분"
                   if m_ai["lead_p10_min"] == m_ai["lead_p10_min"] else "-"})
@@ -252,7 +266,9 @@ def run_all(df: pd.DataFrame, cfg, out_dir: Path, kind: str | None = None,
 
     # 표 7 연산 예산
     budget = {k: v for k, v in t.info.items()
-              if k not in ("labels", "split_report")}
+              if k not in ("labels", "split_report", "availability", "threshold_info",
+                           "pick_prob", "pick_mask", "pick_events", "channels",
+                           "fold_calib", "folds", "snapshot_results")}
     rows7 = [{"항목": k, "값": str(x)} for k, x in budget.items()]
     # 실제로 어떤 모델을 돌렸든 비행 모델(TCN)의 예산은 산식으로 항상 적는다.
     from .models import tcn_budget
@@ -307,8 +323,41 @@ def run_all(df: pd.DataFrame, cfg, out_dir: Path, kind: str | None = None,
         out["t8_degraded"] = _show("표 8  입력 결손 강건성", rows8).to_dict("records")
         _save(pd.DataFrame(rows8), met / "t8_degraded.csv")
 
+    # 표 9 임계값 곡선 - 고른 집합과 시험집합
+    ti = t.info["threshold_info"][H]
+    pick_curve = ti["curve"].assign(집합=f"선택 ({ti.get('where', '-')}, 사건 {ti['n_events']}건)")
+    test_curve = threshold_curve(t.prob[H], index, te_events, te & ~ong,
+                                 int(cfg.get("gate.model_persist_points", 2)), H,
+                                 grid=ti["curve"]["threshold"].to_numpy()
+                                 ).assign(집합=f"시험 (사건 {len(te_events)}건)")
+    curves = pd.concat([pick_curve, test_curve], ignore_index=True)
+    _save(curves, met / "threshold_curve.csv")
+    rows9 = []
+    for pod_goal in (0.5, 0.7, 0.8):
+        r = {"탐지율 하한": f"{pod_goal:.0%}"}
+        for lab, c in (("선택 집합", pick_curve), ("시험집합", test_curve)):
+            ok = c[c["POD"] >= pod_goal]
+            if len(ok):
+                b = ok.sort_values(["FAR", "POD"], ascending=[True, False]).iloc[0]
+                r[f"{lab} 최소 오경보비"] = f"{b['FAR']:.0%}"
+                r[f"{lab} 그때 임계값"] = f"{b['threshold']:.4g}"
+            else:
+                r[f"{lab} 최소 오경보비"] = "도달 불가"
+                r[f"{lab} 그때 임계값"] = "-"
+        rows9.append(r)
+    out["t9_tradeoff"] = _show("표 9  탐지율 하한별 최소 오경보비 (임계값 곡선, 참고)",
+                               rows9).to_dict("records")
+    _save(pd.DataFrame(rows9), met / "t9_tradeoff.csv")
+    print("  시험집합 행은 결과를 보여줄 뿐이다. 임계값은 선택 집합 행으로만 정한다.")
+    out["threshold"] = {str(h): {k: v for k, v in t.info["threshold_info"][h].items()
+                                 if k != "curve"} | {"value": t.thresholds[h]}
+                        for h in t.horizons}
+
     # 그림
     try:
+        plots.event_pod_far_curve(curves, t.threshold, fig / "pod_far_curve.png",
+                                  target_far=float(cfg.get("alarm.target_far", 0.35)),
+                                  target_pod=float(cfg.get("alarm.target_pod", 0.70)))
         plots.use_korean_font()
         plots.lead_time_hist(m_ai["leads_min"], fig / "lead_time.png",
                              target_min=target_lead)
@@ -347,3 +396,83 @@ def run_horizons(df: pd.DataFrame, cfg, out_dir: Path,
     df_out = _show("예측 범위 sweep", rows)
     _save(df_out, out_dir / "metrics" / "horizons.csv")
     return df_out
+
+
+def run_dev(df: pd.DataFrame, cfg, out_dir: Path, kind: str | None = None) -> pd.DataFrame:
+    """개발 모드. 2010-2022 교차검증 예측으로만 평가하고 시험집합은 건드리지 않는다."""
+    from .evaluate import brier_score
+    out_dir = Path(out_dir) / "dev"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    kinds = [kind or cfg.get("model.kind", "tcn")]
+    if "logreg" not in kinds:
+        kinds.append("logreg")
+    rows, rows_fold, curves, snap_rows = [], [], [], []
+    for i, k in enumerate(kinds):
+        print(f"\n[{k}]")
+        t = train(df, cfg, kind=k, verbose=(i == 0))
+        H = t.primary
+        ti = t.info["threshold_info"][H]
+        c = ti["curve"]
+        r = c.iloc[(c["threshold"] - t.threshold).abs().argmin()]
+        pm, pp = t.info["pick_mask"], t.info["pick_prob"][H]
+        row = {"모델": k.upper(), "선택 집합": f"{ti.get('where', '-')} 사건 {ti['n_events']}건",
+               "임계값": f"{t.threshold:.4g}", "탐지율": f"{r['POD']:.0%}",
+               "오경보비": f"{r['FAR']:.0%}", "CSI": f"{r['CSI']:.2f}",
+               "선행 평균": f"{r['lead_mean_min']:.0f}분" if r["lead_mean_min"] == r["lead_mean_min"] else "-",
+               "경보 수": int(r["n_alarms"]),
+               "Brier": f"{brier_score(pp, t.info['labels'][H], pm & np.isfinite(pp)):.5f}"}
+        for goal in (0.5, 0.7, 0.8):
+            ok = c[c["POD"] >= goal]
+            row[f"탐지율≥{goal:.0%} 최소 오경보"] = f"{ok['FAR'].min():.0%}" if len(ok) else "도달 불가"
+        rows.append(row)
+        curves.append(c.assign(모델=k.upper()))
+        for hh in t.horizons[1:]:
+            ci = t.info["threshold_info"][hh]
+            rows.append({"모델": f"{k.upper()} ({hh}분 출력)", "선택 집합": row["선택 집합"],
+                         "임계값": f"{t.thresholds[hh]:.4g}", "탐지율": f"{ci['POD']:.0%}",
+                         "오경보비": f"{ci['FAR']:.0%}", "CSI": "-",
+                         "선행 평균": f"{ci['lead_mean_min']:.0f}분" if ci["lead_mean_min"] == ci["lead_mean_min"] else "-",
+                         "경보 수": "-", "Brier": "-"})
+        sr = t.info.get("snapshot_results") or {}
+        for e in sorted(sr):
+            r_ = {"모델": k.upper(), "epoch": e}
+            for hh in t.horizons:
+                ci = sr[e][hh]
+                cc = ci["curve"]
+                r_[f"{hh}분 탐지율"] = f"{ci['POD']:.0%}"
+                r_[f"{hh}분 오경보"] = f"{ci['FAR']:.0%}"
+                for goal in (0.5, 0.7):
+                    ok_ = cc[cc["POD"] >= goal]
+                    r_[f"{hh}분 탐지율≥{goal:.0%} 최소 오경보"] = f"{ok_['FAR'].min():.0%}" if len(ok_) else "-"
+            snap_rows.append(r_)
+        for blk in t.info.get("folds", []):
+            m_blk = pm & blk
+            evs = [e for e in t.info["pick_events"]
+                   if blk[min(t.index.searchsorted(e[0]), len(t.index) - 1)]]
+            a = _model_alarm(pp, t.index, t.threshold, cfg).where(pd.Series(m_blk, index=t.index), False)
+            mm = event_metrics(a, evs, grace_hours=H / 60.0, cluster_gap_hours=H / 60.0)
+            rows_fold.append({"모델": k.upper(), "블록": f"{t.index[blk][0]:%Y-%m}~{t.index[blk][-1]:%Y-%m}",
+                              "사건": mm["n_events"], "탐지율": f"{mm['POD']:.0%}" if mm["n_events"] else "-",
+                              "오경보비": f"{mm['FAR']:.0%}" if mm["FAR"] == mm["FAR"] else "-",
+                              "경보 수": mm["n_alarms"]})
+    print("\n개발 모드 - 2010-2022 교차검증 결과. 시험집합(2023-)은 계산 안 함.")
+    rows = pd.DataFrame(rows).fillna("-").to_dict("records")
+    res = _show("개발 1  선택 집합 성능 (임계값 규칙 적용)", rows)
+    if rows_fold:
+        _show("개발 2  블록별 (같은 임계값)", rows_fold)
+    if snap_rows:
+        sdf = _show("개발 3  epoch 별", snap_rows)
+        _save(sdf, out_dir / "dev_epochs.csv")
+    _save(res, out_dir / "dev_summary.csv")
+    cv = pd.concat(curves, ignore_index=True)
+    _save(cv, out_dir / "dev_curve.csv")
+    try:
+        plots.use_korean_font()
+        plots.event_pod_far_curve(cv.rename(columns={"모델": "집합"}), float("nan"),
+                                  out_dir / "dev_pod_far_curve.png",
+                                  target_far=float(cfg.get("alarm.target_far", 0.35)),
+                                  target_pod=float(cfg.get("alarm.target_pod", 0.70)))
+    except Exception as e:                                   # noqa: BLE001
+        print(f"  그림 생략: {e}")
+    print(f"\n산출물: {out_dir}")
+    return res

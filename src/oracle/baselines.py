@@ -59,7 +59,7 @@ def persistence(df: pd.DataFrame, **_) -> pd.Series:
 
 def xray_only(df: pd.DataFrame, cadence: int = 5, minutes: float = 2,
               threshold: float = M1_WM2, **_) -> pd.Series:
-    """T1: X선 1–8 Å ≥ 1×10⁻⁵ W/m² (M1급), 2분 연속."""
+    """T1: X선 1-8 Å ≥ 1×10⁻⁵ W/m² (M1급), 2분 연속."""
     c = (df["xrs_long"] >= threshold)
     if XRAY_FLAG in df.columns:                 # 식 구간에는 X선 지표를 쓸 수 없다
         c = c & (df[XRAY_FLAG] > 0)

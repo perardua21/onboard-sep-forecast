@@ -217,3 +217,75 @@ def test_relative_proton_gate_ignores_high_quiet_floor():
     assert absolute[:190].mean() > 0.9           # 원안은 조용한 시간 내내 켜짐
     assert not relative[:190].any()              # 배경 대비는 꺼져 있음
     assert relative[205:].any()
+
+
+def test_threshold_grid_reaches_above_095():
+    from oracle.evaluate import threshold_grid
+    g = threshold_grid()
+    assert g.max() > 0.999 and g.min() < 1e-4
+
+
+def test_threshold_falls_back_to_pod_target():
+    idx = pd.date_range("2020-01-01", periods=6000, freq="5min", tz="UTC")
+    ev = [(idx[1000 + 1000 * k], idx[1010 + 1000 * k]) for k in range(4)]
+    p = np.full(len(idx), 1e-4)
+    for o, _ in ev:
+        k = idx.get_loc(o)
+        p[k - 6:k] = 0.5
+    for k in (300, 1500, 2500, 3500, 4500, 5500):   # 사건과 같은 높이의 헛경보
+        p[k:k + 6] = 0.5
+    th, info = select_threshold(p, idx, ev, np.ones(len(idx), bool), 0.35,
+                                persist_points=2, horizon_min=30, verbose=False)
+    assert info["rule"] == 2 and info["POD"] == 1.0
+
+
+def test_platt_restores_base_rate():
+    from oracle.evaluate import apply_platt, fit_platt
+    rng = np.random.default_rng(0)
+    y = (rng.random(200_000) < 0.001).astype(float)
+    raw = np.where(y == 1, rng.uniform(0.9, 1.0, y.size), rng.uniform(0.0, 0.99, y.size))
+    q = apply_platt(raw, fit_platt(raw, y))
+    assert abs(q.mean() - y.mean()) < 2e-4
+    assert np.all(np.diff(q[np.argsort(raw)]) >= -1e-6)      # 순서 유지
+
+
+def test_cluster_matches_scan_definition():
+    from oracle.alarm_episodes import cluster
+    idx = pd.date_range("2020-01-01", periods=400, freq="5min", tz="UTC")
+    a = pd.Series(False, index=idx)
+    a.iloc[[10, 11, 20, 60, 61, 62, 200]] = True
+    assert len(cluster(a, gap_hours=1.0)) == 3      # 10-20 / 60-62 / 200
+    assert cluster(a, gap_hours=1.0)[0] == (idx[10], idx[20])
+
+
+def test_pod_priority_keeps_pod_target():
+    idx = pd.date_range("2020-01-01", periods=6000, freq="5min", tz="UTC")
+    ev = [(idx[1000 + 1000 * k], idx[1010 + 1000 * k]) for k in range(4)]
+    p = np.full(len(idx), 1e-4)
+    for k, (o, _) in enumerate(ev):
+        j = idx.get_loc(o)
+        p[j - 6:j] = 0.9 if k < 3 else 0.3          # 3건은 높게, 1건은 낮게
+    p[300:306] = 0.3                                # 낮은 쪽과 같은 높이의 헛경보
+    th, info = select_threshold(p, idx, ev, np.ones(len(idx), bool), 0.35,
+                                persist_points=2, horizon_min=30, verbose=False,
+                                target_pod=0.70, priority="pod")
+    assert info["POD"] >= 0.70 and info["FAR"] == 0.0 and th > 0.3
+
+
+def test_long_baseline_uses_only_past():
+    from oracle.features import _long_baseline
+    idx = pd.date_range("2020-01-01", periods=12 * 24 * 10, freq="5min", tz="UTC")
+    lg = pd.Series(0.0, index=idx)
+    lg.iloc[-12 * 24:] = 5.0                        # 마지막 하루만 크게
+    b = _long_baseline(lg, 5, days=3)
+    assert b.iloc[-12 * 24] == 0.0                  # 그날 첫 점의 기준값은 과거만 본다
+
+
+def test_subsample_keeps_every_positive():
+    from oracle.train import subsample
+    mask = np.ones(1000, bool)
+    pos = np.zeros(1000, bool)
+    pos[[5, 6, 7, 500, 501]] = True
+    idx = subsample(mask, pos, 3)
+    assert set(np.flatnonzero(pos)) <= set(idx)
+    assert len(idx) < 400

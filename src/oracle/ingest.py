@@ -325,7 +325,7 @@ def _check_dates(path: Path, d: pd.DataFrame | None) -> pd.DataFrame | None:
 def read_ace_hapi(path: Path) -> pd.DataFrame | None:
     """CDAWeb HAPI CSV (AC_H1_EPM). 머리말(#)의 JSON 에서 열 이름과 결측값을 읽는다.
 
-    e_dif_lo = DE3 (0.103–0.175 MeV), e_dif_hi = DE4 (0.175–0.315 MeV).
+    e_dif_lo = DE3 (0.103-0.175 MeV), e_dif_hi = DE4 (0.175-0.315 MeV).
     DE4 가 Núñez(2018)·REleASE 가 쓰는 준상대론적 전자 대역이다.
     """
     import json

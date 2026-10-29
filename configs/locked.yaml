@@ -43,12 +43,21 @@ model:
   onboard_resample_s: 25          # 60분 창 -> 145점, 17.4 MFLOPs
   n_blocks: 4                     # 수용영역 181점. 145점 창 전체를 본다
   kernel_size: 7
-  dropout: 0.2
-  lr: 0.002
-  weight_decay: 0.0001
-  epochs: 20
+  dropout: 0.3
+  lr: 0.001
+  weight_decay: 0.01
+  epochs: 25                      # early_stop 일 때만
+  patience: 5
+  pos_weight: sqrt                # sqrt(음성/양성) | balanced
   batch_size: 256
   stride_min: 15
+  keep_all_positive: true         # 솎을 때 양성은 남김
+  epochs_mode: fixed              # fixed | early_stop
+  epochs_fixed: 3                 # 길게 돌리면 과적합 (experiment_log dev2)
+  soft_label_weight: 0.5          # 학습 목표만. 평가는 원래 라벨
+  ema_decay: 0.999
+  cosine_lr: false
+  fit_on: train_valid             # train(2010-2019) | train_valid(2010-2022)
   seed: 20170910
   param_budget: [50000, 150000]
   flops_budget_m: 20
@@ -81,6 +90,15 @@ inference:
   beacon_period_s: 10
   beacon_bytes: 32
   beacon_valid_s: 60
+
+threshold:                        # 시험집합은 쓰지 않는다
+  priority: pod                   # pod: 탐지율 70% 이상 중 오경보 최소 / far: 오경보 35% 이하 중 탐지율 최대
+  select_on: cv                   # cv | valid (검증 구간은 사건 7건)
+  cv_folds: 4
+  cv_gap_days: 1
+  per_fold_calibration: true
+  calibrate: platt                # platt | none
+  ablation_select_on: cv
 
 alarm:
   # 경보 묶음 간격과 유예는 따로 두지 않고 예측 범위(30분/60분)와 같게 쓴다.

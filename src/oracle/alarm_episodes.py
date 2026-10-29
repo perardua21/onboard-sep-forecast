@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+import numpy as np
 import pandas as pd
 
 
@@ -16,22 +17,15 @@ def persist(raw: pd.Series, minutes: int, cadence: int = 5) -> pd.Series:
 
 
 def cluster(alarm: pd.Series, gap_hours: float = 3.0):
-    """연속 경보를 gap_hours 기준으로 하나로 묶는다 → [(시작, 끝), ...]"""
+    """연속 경보를 묶는다 → [(시작, 끝), ...]. gap_hours 이상 꺼지면 새 묶음."""
     a = alarm.fillna(False).to_numpy(dtype=bool)
+    on = np.flatnonzero(a)
+    if on.size == 0:
+        return []
     idx = alarm.index
-    out, i, n = [], 0, len(a)
-    while i < n:
-        if not a[i]:
-            i += 1
-            continue
-        j, last = i, i
-        while j < n:
-            if a[j]:
-                last, j = j, j + 1
-                continue
-            if (idx[j] - idx[last]).total_seconds() / 3600.0 >= gap_hours:
-                break
-            j += 1
-        out.append((idx[i], idx[last]))
-        i = j
-    return out
+    t = np.asarray((idx - idx[0]) / pd.Timedelta(seconds=1), dtype=float)
+    prev, nxt = on[:-1], on[1:]
+    merge = (nxt == prev + 1) | ((t[nxt - 1] - t[prev]) < gap_hours * 3600.0)
+    starts = np.concatenate([[on[0]], nxt[~merge]])
+    ends = np.concatenate([prev[~merge], [on[-1]]])
+    return list(zip(idx[starts], idx[ends]))

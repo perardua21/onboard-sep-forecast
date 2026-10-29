@@ -79,7 +79,7 @@ def event_timeseries(df: pd.DataFrame, prob: np.ndarray, threshold: float,
     use_korean_font()
     w = df.loc[onset - pd.Timedelta(hours=before_h): onset + pd.Timedelta(hours=after_h)]
     p = pd.Series(prob, index=df.index).loc[w.index]
-    rows = [("xrs_long", "X선 1–8 Å [W/m²]", SKY["line"]),
+    rows = [("xrs_long", "X선 1-8 Å [W/m²]", SKY["line"]),
             ("e_gt2", "전자 >2 MeV", SKY["mute"]),
             ("p_gt10", "양성자 ≥10 MeV [pfu]", SKY["ink"])]
     fig, axes = plt.subplots(4, 1, figsize=(7.6, 7.4), dpi=200, sharex=True,
@@ -133,6 +133,33 @@ def far_pod_curve(prob, y, path: Path, grid: int = 101):
     ax.set_title("임계값에 따른 탐지율·오경보율", color=SKY["ink"],
                  fontsize=11, fontweight="bold", loc="left")
     ax.legend(fontsize=8.5, frameon=False)
+    _style(ax)
+    fig.tight_layout(); fig.savefig(path); plt.close(fig)
+
+
+def event_pod_far_curve(curves: pd.DataFrame, chosen: float, path: Path,
+                        target_far: float = 0.35, target_pod: float = 0.70):
+    """사건 단위 탐지율-오경보비 곡선. 집합마다 선 하나, 고른 임계값에 점."""
+    use_korean_font()
+    fig, ax = plt.subplots(figsize=(6.4, 4.4), dpi=200)
+    colors = [SKY["line"], SKY["accent"], SKY["mute"]]
+    for k, (name, c) in enumerate(curves.groupby("집합", sort=False)):
+        c = c.dropna(subset=["POD", "FAR"]).sort_values("threshold")
+        col = colors[k % len(colors)]
+        ax.plot(c["FAR"], c["POD"], color=col, lw=2, marker="o", ms=2.5, label=name)
+        j = (c["threshold"] - chosen).abs().idxmin() if len(c) and chosen == chosen else None
+        if j is not None:
+            ax.plot(c.loc[j, "FAR"], c.loc[j, "POD"], "o", ms=8, mfc="white", mec=col, mew=2)
+    ax.axvline(target_far, color=SKY["ink"], lw=1, ls=":")
+    ax.axhline(target_pod, color=SKY["ink"], lw=1, ls=":")
+    ax.text(target_far + 0.01, 0.03, f"오경보 상한 {target_far:.0%}", fontsize=8, color=SKY["ink"])
+    ax.text(0.01, target_pod + 0.02, f"탐지율 목표 {target_pod:.0%}", fontsize=8, color=SKY["ink"])
+    ax.set_xlim(0, 1); ax.set_ylim(0, 1.03)
+    ax.set_xlabel("오경보비 (사건 단위)", color=SKY["ink"])
+    ax.set_ylabel("탐지율 (사건 단위)", color=SKY["ink"])
+    ax.set_title("임계값에 따른 탐지율과 오경보비 (흰 점 = 고른 임계값)", color=SKY["ink"],
+                 fontsize=11, fontweight="bold", loc="left")
+    ax.legend(fontsize=8.5, frameon=False, loc="lower right")
     _style(ax)
     fig.tight_layout(); fig.savefig(path); plt.close(fig)
 

@@ -226,7 +226,7 @@ def download(url: str, dest: Path) -> dict | None:
 ACE_HAPI = "https://cdaweb.gsfc.nasa.gov/hapi"
 ACE_DATASET = "AC_H1_EPM"                      # 5분 level 2
 #: 원하는 채널. 서버의 실제 변수 이름은 info 로 물어서 맞춘다.
-ACE_WANT = ("DE3", "DE4")                      # 0.103–0.175 / 0.175–0.315 MeV
+ACE_WANT = ("DE3", "DE4")                      # 0.103-0.175 / 0.175-0.315 MeV
 _ACE_PARAMS: list | None = None
 
 

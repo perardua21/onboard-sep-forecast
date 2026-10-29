@@ -21,6 +21,19 @@ def make_windows(F: pd.DataFrame, window_min: int = 60, cadence: int = 5,
     return out, F.index[ends]
 
 
+def end_bound(x):
+    """구간 끝 (이 시각 미만). 날짜만 주면 그날 하루 전체를 포함한다.
+
+    자정으로 읽으면 12-31 이 다음 구간으로 넘어갔다.
+    """
+    if x is None:
+        return None
+    t = pd.Timestamp(x, tz="UTC")
+    if len(str(x).strip()) == 10:
+        return t + pd.Timedelta(days=1)
+    return t + pd.Timedelta(1, "ns")
+
+
 def time_split(index: pd.DatetimeIndex, train_end: str, valid_end: str,
                train_start: str | None = None, test_end: str | None = None):
     """시간순 분할. 창을 만든 뒤 무작위로 섞지 않는다.
@@ -31,17 +44,15 @@ def time_split(index: pd.DatetimeIndex, train_end: str, valid_end: str,
       잠금 시험 2023-01-01 ~ 2026-10-22
     범위 밖(시험 끝 이후)은 어느 쪽에도 넣지 않는다.
     """
-    def ts(x):
-        return None if x is None else pd.Timestamp(x, tz="UTC")
-
-    t0, t1, t2, t3 = ts(train_start), ts(train_end), ts(valid_end), ts(test_end)
-    tr = np.asarray(index <= t1)
+    t0 = None if train_start is None else pd.Timestamp(train_start, tz="UTC")
+    b1, b2, b3 = end_bound(train_end), end_bound(valid_end), end_bound(test_end)
+    tr = np.asarray(index < b1)
     if t0 is not None:
         tr &= np.asarray(index >= t0)
-    va = np.asarray((index > t1) & (index <= t2))
-    te = np.asarray(index > t2)
-    if t3 is not None:
-        te &= np.asarray(index <= t3)
+    va = np.asarray((index >= b1) & (index < b2))
+    te = np.asarray(index >= b2)
+    if b3 is not None:
+        te &= np.asarray(index < b3)
     return tr, va, te
 
 

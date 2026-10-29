@@ -100,39 +100,169 @@ def event_metrics(alarm: pd.Series, events, grace_hours: float = 0.5,
     }
 
 
-def select_threshold(prob, index, events, valid_mask, target_far: float = 0.35,
-                     persist_points: int = 2, horizon_min: int = 30,
-                     grid=None, verbose: bool = True) -> tuple[float, dict]:
-    """검증집합에서 사건 단위 지표로 임계값을 고른다.
+def threshold_grid(lo: float = -12.0, hi: float = 8.0, n: int = 81) -> np.ndarray:
+    """로짓 공간에서 고르게 나눈 임계값 (약 6e-6 ~ 0.9997).
 
-    보고하는 것이 사건 단위 탐지율·오경보비이므로 고르는 기준도 같아야 한다.
-    표본 단위 오경보율로 고르면 둘이 따로 논다.
-
-    오경보비 ≤ target 인 것 중 탐지율이 가장 높은 것, 같으면 평균 선행시간이
-    긴 것. 조건을 만족하는 값이 없으면 오경보비가 가장 낮은 것을 쓰고 알린다.
+    보정 후 확률은 대부분 0.1 아래라 0.05~0.95 균등 격자로는 부족하다.
     """
+    return 1.0 / (1.0 + np.exp(-np.linspace(lo, hi, n)))
+
+
+def threshold_curve(prob, index, events, valid_mask, persist_points: int = 2,
+                    horizon_min: int = 30, grid=None) -> pd.DataFrame:
+    """임계값마다 사건 단위 탐지율·오경보비·CSI·선행시간."""
     from .predict import to_alarm
-    grid = np.round(np.arange(0.05, 0.951, 0.025), 3) if grid is None else grid
+    grid = threshold_grid() if grid is None else np.asarray(grid, dtype=float)
     h = horizon_min / 60.0
     vm = pd.Series(np.asarray(valid_mask, dtype=bool), index=index)
     rows = []
     for th in grid:
         a = to_alarm(prob, index, float(th), persist_points).where(vm, False)
         m = event_metrics(a, events, grace_hours=h, cluster_gap_hours=h)
-        rows.append((float(th), m["POD"], m["FAR"], m["lead_mean_min"]))
-    ok = [r for r in rows if r[2] == r[2] and r[2] <= target_far and r[1] == r[1]]
-    if ok:
-        best = max(ok, key=lambda r: (r[1], -r[2], r[3] if r[3] == r[3] else -1, r[0]))
-        note = "조건 충족"
+        rows.append({"threshold": float(th), "POD": m["POD"], "FAR": m["FAR"],
+                     "CSI": m["CSI"], "lead_mean_min": m["lead_mean_min"],
+                     "n_alarms": m["n_alarms"], "n_events": m["n_events"]})
+    return pd.DataFrame(rows)
+
+
+def select_threshold(prob, index, events, valid_mask, target_far: float = 0.35,
+                     persist_points: int = 2, horizon_min: int = 30,
+                     grid=None, verbose: bool = True, target_pod: float = 0.70,
+                     where: str = "검증", priority: str = "far") -> tuple[float, dict]:
+    """사건 단위 탐지율·오경보비로 임계값을 고른다. 시험집합은 넣지 말 것.
+
+    priority="far" (오경보 우선)
+      1. 오경보비 ≤ target_far 인 것 중 탐지율이 가장 높은 것
+      2. 그런 값이 없으면 탐지율 ≥ target_pod 를 지키는 것 중 오경보비가 가장 낮은 것
+      3. 그것도 없으면 CSI 가 가장 높은 것
+    priority="pod" (탐지율 우선)
+      1. 탐지율 ≥ target_pod 를 지키는 것 중 오경보비가 가장 낮은 것
+      2. 그런 값이 없으면 탐지율이 가장 높은 것 (같으면 오경보비가 낮은 것)
+    """
+    curve = threshold_curve(prob, index, events, valid_mask, persist_points,
+                            horizon_min, grid)
+    c = curve.dropna(subset=["POD"]).copy()
+    c["lead"] = c["lead_mean_min"].fillna(-1.0)
+    c["far"] = c["FAR"].fillna(1.0)
+    if priority == "pod":
+        keep = c[c["POD"] >= target_pod]
+        if len(keep):
+            best = keep.sort_values(["far", "POD", "threshold"],
+                                    ascending=[True, False, False]).iloc[0]
+            rule, note = 1, f"탐지율 {target_pod:.0%} 이상 중 오경보비 최소"
+        else:
+            best = c.sort_values(["POD", "far"], ascending=[False, True]).iloc[0]
+            rule, note = 2, f"탐지율 {target_pod:.0%} 에 닿는 임계값이 없음 → 탐지율 최대"
+        if verbose and rule > 1:
+            print(f"  ! {where}: {note}. 임계값 {best['threshold']:.4g} "
+                  f"(오경보비 {best['far']:.0%}, 탐지율 {best['POD']:.0%})")
+        return float(best["threshold"]), {
+            "POD": float(best["POD"]), "FAR": float(best["FAR"]),
+            "lead_mean_min": float(best["lead_mean_min"]), "rule": rule,
+            "note": note, "n_events": len(events), "curve": curve, "priority": "pod"}
+    ok = c[c["far"] <= target_far]
+    if len(ok) and ok["POD"].max() > 0:
+        best = ok.sort_values(["POD", "far", "lead", "threshold"],
+                              ascending=[False, True, False, False]).iloc[0]
+        rule, note = 1, "조건 충족"
     else:
-        cand = [r for r in rows if r[2] == r[2]] or rows
-        best = min(cand, key=lambda r: (r[2] if r[2] == r[2] else 9, -r[1]))
-        note = f"오경보비 {target_far:.0%} 이하를 만족하는 임계값이 없음"
-        if verbose:
-            print(f"  ! 검증집합에서 {note}. 오경보비가 가장 낮은 {best[0]:.3f} 을 쓴다 "
-                  f"(오경보비 {best[2]:.0%}, 탐지율 {best[1]:.0%})")
-    return best[0], {"POD": best[1], "FAR": best[2], "lead_mean_min": best[3],
-                     "note": note, "n_events": len(events)}
+        keep = c[c["POD"] >= target_pod]
+        if len(keep):
+            best = keep.sort_values(["far", "POD", "threshold"],
+                                    ascending=[True, False, False]).iloc[0]
+            rule = 2
+            note = (f"오경보비 {target_far:.0%} 이하를 만족하는 임계값이 없음 → "
+                    f"탐지율 {target_pod:.0%} 이상 중 오경보비 최소")
+        else:
+            best = c.sort_values(["CSI", "POD"], ascending=[False, False]).iloc[0]
+            rule = 3
+            note = (f"오경보비 {target_far:.0%} 이하, 탐지율 {target_pod:.0%} 이상 "
+                    f"모두 만족하는 임계값이 없음 → CSI 최대")
+    if verbose and rule > 1:
+        print(f"  ! {where}: {note}. 임계값 {best['threshold']:.4g} "
+              f"(오경보비 {best['far']:.0%}, 탐지율 {best['POD']:.0%})")
+    return float(best["threshold"]), {
+        "POD": float(best["POD"]), "FAR": float(best["FAR"]),
+        "lead_mean_min": float(best["lead_mean_min"]), "rule": rule,
+        "note": note, "n_events": len(events), "curve": curve}
+
+
+# 확률 보정
+def _logit(p):
+    p = np.clip(np.asarray(p, dtype=float), 1e-7, 1 - 1e-7)
+    return np.log(p / (1 - p))
+
+
+def _fit_b(x, t, a, b=0.0, iters=60):
+    """a 고정, b 만 뉴턴법으로."""
+    for _ in range(iters):
+        q = 1.0 / (1.0 + np.exp(-np.clip(a * x + b, -40, 40)))
+        g, h = np.sum(q - t), np.sum(q * (1 - q)) + 1e-9
+        step = float(np.clip(g / h, -5, 5))
+        b -= step
+        if abs(step) < 1e-8:
+            break
+    return b
+
+
+def fit_platt(prob, y, ridge: float = 1.0, iters: int = 100,
+              a_bounds=(0.05, 5.0)) -> tuple[float, float]:
+    """Platt 보정. logit(p) 에 a*x + b 를 맞춘다. 단조라 경보 순서는 그대로.
+
+    완전 분리되면 a 가 발산해서 (a-1)^2 벌점과 a_bounds 를 둔다.
+    """
+    x = _logit(prob)
+    t = np.asarray(y, dtype=float)
+    m = np.isfinite(x) & np.isfinite(t)
+    x, t = x[m], t[m]
+    if t.size == 0 or t.min() == t.max():
+        return 1.0, 0.0
+
+    def loss(a, b):
+        z = a * x + b
+        return float(np.sum(np.logaddexp(0, z) - t * z) + 0.5 * ridge * (a - 1.0) ** 2)
+
+    a = 1.0
+    b = _fit_b(x, t, a)
+    cur = loss(a, b)
+    for _ in range(iters):
+        q = 1.0 / (1.0 + np.exp(-np.clip(a * x + b, -40, 40)))
+        w = q * (1 - q)
+        ga = np.sum((q - t) * x) + ridge * (a - 1.0)
+        gb = np.sum(q - t)
+        haa, hab, hbb = np.sum(w * x * x) + ridge, np.sum(w * x), np.sum(w) + 1e-9
+        det = haa * hbb - hab * hab
+        if det <= 0:
+            break
+        da = (hbb * ga - hab * gb) / det
+        db = (haa * gb - hab * ga) / det
+        step = 1.0
+        while step > 1e-6:
+            na, nb = a - step * da, b - step * db
+            nl = loss(na, nb)
+            if nl <= cur:
+                break
+            step *= 0.5
+        else:
+            break
+        done = abs(na - a) < 1e-8 and abs(nb - b) < 1e-8
+        a, b, cur = na, nb, nl
+        if done:
+            break
+    if not (a_bounds[0] <= a <= a_bounds[1]):
+        a = float(np.clip(a, *a_bounds))
+        b = _fit_b(x, t, a, b)
+    return float(a), float(b)
+
+
+def apply_platt(prob, ab) -> np.ndarray:
+    p = np.asarray(prob, dtype=float)
+    if ab is None:
+        return p
+    a, b = ab
+    out = 1.0 / (1.0 + np.exp(-np.clip(a * _logit(p) + b, -40, 40)))
+    out[~np.isfinite(p)] = np.nan
+    return out.astype(np.float32)
 
 
 # 확률 품질
@@ -273,7 +403,7 @@ def fmt_row(name: str, m: dict, note: str = "", with_ci: bool = True,
     pod = _pct(m["POD"])
     if with_ci and m["n_events"]:
         lo, hi = wilson_interval(m["n_detected"], m["n_events"])
-        pod += f" ({lo*100:.0f}–{hi*100:.0f})"
+        pod += f" ({lo*100:.0f}-{hi*100:.0f})"
     row = {
         "방법": name,
         "사건": m["n_events"],
@@ -288,7 +418,7 @@ def fmt_row(name: str, m: dict, note: str = "", with_ci: bool = True,
     }
     if boot:
         lo, hi = boot["POD_ci"]
-        row["탐지율 95%CI"] = f"{lo*100:.0f}–{hi*100:.0f}" if lo == lo else "-"
+        row["탐지율 95%CI"] = f"{lo*100:.0f}-{hi*100:.0f}" if lo == lo else "-"
     return row
 
 
@@ -307,12 +437,13 @@ def verdict(m: dict, cfg) -> dict:
     elif pod >= t_pod and far <= t_far and lead >= t_lead:
         level = "완전 성공"
     elif pod >= t_min:
-        level = "최소 성공"
+        level = "최소 성공 (탐지율 기준)" if far > t_far or lead < t_lead else "최소 성공"
     else:
         level = "미달"
     return {
         "판정": level,
         "탐지율": f"{_pct(pod)} / 목표 {t_pod*100:.0f}%",
-        "오경보비": f"{_pct(far)} / 상한 {t_far*100:.0f}%",
+        "오경보비": f"{_pct(far)} / 상한 {t_far*100:.0f}%"
+                    + (" (미충족)" if far == far and far > t_far else ""),
         "평균 선행시간": f"{_min(lead)} / 하한 {t_lead:.0f}분",
     }

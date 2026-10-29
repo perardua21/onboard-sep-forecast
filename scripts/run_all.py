@@ -17,7 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from oracle.config import load_config                    # noqa: E402
-from oracle.experiments import run_all, run_horizons     # noqa: E402
+from oracle.experiments import run_all, run_dev, run_horizons  # noqa: E402
 from oracle.ingest import build_dataset, load_dataset    # noqa: E402
 
 
@@ -30,6 +30,10 @@ def main():
     ap.add_argument("--model", choices=["tcn", "cnn1d", "logreg", "gbt"], default=None)
     ap.add_argument("--event", default=None, help="대표 사건 날짜 YYYY-MM-DD")
     ap.add_argument("--horizons", action="store_true", help="EXP-03 만 실행")
+    ap.add_argument("--dev", action="store_true",
+                    help="2010-2022 교차검증 결과만 (시험집합 미계산)")
+    ap.add_argument("--skip-ablation", action="store_true",
+                    help="표 2 제거 실험 생략")
     ap.add_argument("--out", default=None)
     a = ap.parse_args()
 
@@ -55,7 +59,7 @@ def main():
         print(f"합성 분할: train ~{cfg.raw['split']['train_end']} / "
               f"valid ~{cfg.raw['split']['valid_end']} / test 이후\n")
         print("실제 자료에서는 configs/locked.yaml 의 "
-              "2010–2019 / 2020–2022 / 2023–2026-10-22 분할이 쓰인다.\n")
+              "2010-2019 / 2020-2022 / 2023-2026-10-22 분할이 쓰인다.\n")
     else:
         path = cfg.path(a.data or cfg.get("data.path"))
         if not path.exists() and path.with_suffix(".csv").exists():
@@ -67,12 +71,18 @@ def main():
         df = load_dataset(path, cfg.cadence)
         print(f"자료 {df.index[0]} ~ {df.index[-1]}  ({len(df):,} 표본 @ {cfg.cadence}분)\n")
 
+    if a.dev:
+        cfg.raw.setdefault("model", {}).setdefault("snapshot_epochs", [1, 2, 3, 4, 6])
+        run_dev(df, cfg, out, kind=a.model)
+        return
+
     if a.horizons:
         print("EXP-03 예측 범위 sweep")
         run_horizons(df, cfg, out, kind=a.model)
         return
 
-    run_all(df, cfg, out, kind=a.model, event_date=a.event)
+    run_all(df, cfg, out, kind=a.model, event_date=a.event,
+            ablation=not a.skip_ablation)
 
 
 if __name__ == "__main__":

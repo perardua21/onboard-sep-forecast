@@ -7,7 +7,7 @@ docs/spec.md 참조.
 from __future__ import annotations
 
 # 17채널
-XRS = ["xrs_long", "xrs_short"]                     # 1–8 Å, 0.5–4 Å  (2)
+XRS = ["xrs_long", "xrs_short"]                     # 1-8 Å, 0.5-4 Å  (2)
 
 ELECTRON = ["e_gt0p8", "e_gt2", "e_gt4",            # 적분       (3)
             "e_dif_lo", "e_dif_hi"]                 # 미분 대표  (2)  = 5
