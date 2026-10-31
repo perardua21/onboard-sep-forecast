@@ -32,6 +32,14 @@ def use_korean_font():
         except Exception:                               # noqa: BLE001
             continue
     plt.rcParams["axes.unicode_minus"] = False
+    plt.rcParams["mathtext.fontset"] = "dejavusans"        # 로그 눈금의 − 기호
+
+
+def _plain_log(ax):
+    """로그 축 눈금을 0.01, 1, 100 처럼 쓴다. 기본 10^-2 꼴은 수식 글꼴의 − 를 써서
+    맑은 고딕에서 글리프 경고가 난다."""
+    from matplotlib.ticker import FuncFormatter
+    ax.yaxis.set_major_formatter(FuncFormatter(lambda v, _: f"{v:g}"))
 
 
 def _style(ax):
@@ -86,6 +94,7 @@ def event_timeseries(df: pd.DataFrame, prob: np.ndarray, threshold: float,
                              gridspec_kw={"height_ratios": [1, 1, 1, 0.8]})
     for ax, (c, lab, col) in zip(axes, rows):
         ax.semilogy(w.index, w[c], color=col, lw=1.3)
+        _plain_log(ax)
         ax.set_ylabel(lab, fontsize=8.5, color=SKY["ink"])
         if c == "p_gt10":
             ax.axhline(S1_PFU, color=SKY["accent"], ls="--", lw=1.4)
@@ -187,7 +196,40 @@ def reliability_diagram(rel: pd.DataFrame, path: Path):
     bx.bar(rel["bin_lo"] + 0.05, rel["n"].clip(lower=1), width=0.09,
            color=SKY["fill"], edgecolor=SKY["line"], lw=0.8)
     bx.set_yscale("log")
+    _plain_log(bx)
     bx.set_ylabel("표본 수", color=SKY["ink"], fontsize=8.5)
     bx.set_xlabel("예측 확률", color=SKY["ink"])
     _style(bx)
+    fig.tight_layout(); fig.savefig(path); plt.close(fig)
+
+
+def dose_event_cases(P: pd.DataFrame, events, path: Path, h: int = 30,
+                     models=("지속성", "릿지(전체 입력)"), n: int = 4, thresholds=(10, 100)):
+    """큰 사건 n 개의 실측 선량과 h분 예측 (예측값은 목표 시각에 맞춰 그린다)."""
+    use_korean_font()
+    big = sorted(events, key=lambda e: -e.peak_pfu)[:n]
+    fig, axes = plt.subplots(len(big), 1, figsize=(7.6, 2.3 * len(big)), dpi=180, sharex=False)
+    axes = np.atleast_1d(axes)
+    colors = {models[0]: SKY["mute"], models[-1]: SKY["accent"]}
+    for ax, ev in zip(axes, big):
+        g = P[(P["h"] == h) & (P["eid"] == ev.eid)]
+        if g.empty:
+            continue
+        a = ev.rise_start - pd.Timedelta(hours=3) if ev.rise_start is not None else ev.onset
+        b = (ev.rise_end or ev.end) + pd.Timedelta(hours=3)
+        base = g[g["model"] == models[0]].loc[a:b]
+        ax.plot(base.index + pd.Timedelta(minutes=h), 10 ** base["y"], color=SKY["ink"], lw=1.6, label="실측")
+        for m in models:
+            gm = g[g["model"] == m].loc[a:b]
+            ax.plot(gm.index + pd.Timedelta(minutes=h), 10 ** gm["yhat"], lw=1.1,
+                    color=colors.get(m, SKY["line"]), label=f"{m} ({h}분 예측)")
+        for t in thresholds:
+            ax.axhline(t, color=SKY["grid"], lw=1, ls="--")
+        ax.set_yscale("log")
+        _plain_log(ax)
+        ax.set_title(f"{ev.onset:%Y-%m-%d} (≥10 MeV 정점 {ev.peak_pfu:,.0f} pfu)", fontsize=9,
+                     loc="left", color=SKY["ink"])
+        ax.set_ylabel("µGy/min", fontsize=8)
+        _style(ax)
+    axes[0].legend(fontsize=7, frameon=False, loc="upper left")
     fig.tight_layout(); fig.savefig(path); plt.close(fig)

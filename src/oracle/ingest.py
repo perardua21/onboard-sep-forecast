@@ -512,6 +512,25 @@ def _write_table(df: pd.DataFrame, path: Path) -> Path:
     return path
 
 
+def despike(df: pd.DataFrame, cols=None, factor: float = 20.0, window: int = 7) -> pd.DataFrame:
+    """한 점만 튀는 값을 결측으로 바꾼다.
+
+    GOES 양성자에 앞뒤보다 수천~수백만 배 큰 한 점이 가끔 있다
+    (예: 2025-10-07 00:10 의 ≥10 MeV 2.7e7 pfu). 앞뒤 창의 중앙값보다 factor 배
+    넘게 크고, 바로 앞·뒤 점보다도 factor 배 넘게 큰 점만 고친다. 진짜 사건은
+    여러 점에 걸쳐 오르므로 걸리지 않는다. 과거 자료 정리용이라 앞뒤 값을 함께 본다.
+    """
+    out = df.copy()
+    cols = cols or [c for c in out.columns if c.startswith(("p_gt", "e_"))]
+    for c in cols:
+        x = out[c]
+        med = x.rolling(window, center=True, min_periods=3).median()
+        nb = pd.concat([x.shift(1), x.shift(-1)], axis=1).max(axis=1)
+        bad = (x > factor * med) & (x > factor * nb)
+        out.loc[bad, c] = np.nan
+    return out
+
+
 def load_dataset(path: Path, cadence_min: int = 5) -> pd.DataFrame:
     p = Path(path)
     if p.suffix == ".parquet" and not p.exists() and p.with_suffix(".csv").exists():
@@ -521,6 +540,7 @@ def load_dataset(path: Path, cadence_min: int = 5) -> pd.DataFrame:
     if df.index.tz is None:
         df.index = df.index.tz_localize("UTC")
     df = df.sort_index().resample(f"{cadence_min}min").mean()
+    df = despike(df)
     if XRAY_FLAG not in df.columns:
         df = add_xray_flag(df)
     return fill_missing(df)

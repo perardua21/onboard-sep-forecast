@@ -25,3 +25,4 @@ docs/variable_inventory.txt
 *.hwp
 outputs/run*/
 outputs/dev*/
+outputs/dose/

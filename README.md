@@ -78,6 +78,29 @@ python scripts/run_all.py --model tcn --event 2017-09-10
 궤도 위상을 균등 추첨해서 수신 선행시간의 분포를 내고, 수신이 사건 도달보다
 늦은 경우를 따로 센다.
 
+## 선량률 예측
+
+SEP 시작 확률 대신 **10·30·60분 뒤 흡수선량률(µGy/min)** 을 직접 예측한다.
+정점 ≥100 pfu(S2) 사건이 대상이다.
+
+| | |
+|---|---|
+| 정답 | LRO/CRaTER D1·2 선량률 (달 궤도, 물 환산). 시간별 값을 1초 계수로 1분 단위로 나눔 |
+| 입력 | 실측 선량률과 상승률, GOES 양성자로 계산한 선량률, 기존 GOES 입력 (최근 60분) |
+| 출력 | log10 선량률 at t+10, 30, 60분 |
+| 경보 | 예측이 10 또는 100 µGy/min 근처를 넘으면. 문턱은 학습 사건 안 교차검증으로 탐지율 70% 에 맞춘다 |
+| 검증 | 사건 단위 7겹 교차검증 (28건) |
+
+```bash
+python scripts/fetch_dose.py --iswa          # 시간별 선량률 (수 MB)
+python scripts/fetch_dose.py --events        # 사건 앞뒤 1초 계수 (사건당 약 70 MB)
+python scripts/build_dose.py                 # data/processed/dose_1min.csv
+python scripts/run_dose.py --cadence 1 --tcn --seeds 0,1,2
+```
+
+비교군은 지속성(지금 값 유지), 30분 상승률 외삽, 계산 선량(보정), 릿지, GBT, TCN.
+경보는 30분 안에 이어진 것을 한 묶음으로 센다. 결과와 경과는 `docs/experiment_log.md`.
+
 ## 알려진 한계
 
 - GOES-16 SGPS 양성자 자료는 2020년부터다. 학습 구간은 구세대 EPEAD 를 쓰게
@@ -85,6 +108,8 @@ python scripts/run_all.py --model tcn --event 2017-09-10
 - EPEAD 는 >100 MeV 까지라 구세대 구간에서 `p_gt500` 이 결측이다.
 - 선량률 2채널은 지상 자료로 채울 수 없다. 0 으로 두되 유무 플래그로 표시한다.
 - 지상 재현은 5분 격자다. 10초 추론보다 선행시간이 한 격자만큼 짧게 나온다.
+- 선량 실측은 달 궤도 LRO 한 기체의 한 검출기 쌍이다. 차폐가 다른 위치의 선량과는
+  배율이 다르다. 사건이 28건이라 사건 단위 숫자는 1~2건에 크게 흔들린다.
 - 합성 자료는 선행 신호를 규칙적으로 심어 둔 것이라 성능이 실제보다 훨씬 좋게
   나온다. 어떤 표에도 넣지 않는다.
 
@@ -109,7 +134,13 @@ src/oracle/
   experiments.py        표 생성
   ingest.py             원본 적재 (파일 여러 개를 시각 기준으로 병합)
   plots.py              그림
+  dose.py               GOES 양성자 → 계산 선량률
+  crater.py             CRaTER 시간별 선량률을 1분 단위로
+  dosecast.py           선량률 예측 특징, 모델, 사건 단위 검증
 scripts/fetch_data.py   공개 아카이브 내려받기
+scripts/fetch_dose.py   CRaTER 선량 자료 내려받기
+scripts/build_dose.py   1분 선량률 표 만들기
+scripts/run_dose.py     선량률 예측 실행
 tools/pytest_shim/      pytest 없는 환경용 대역
 ```
 

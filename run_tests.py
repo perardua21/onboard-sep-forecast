@@ -11,7 +11,7 @@ sys.path.append(str(ROOT / "tools" / "pytest_shim"))
 
 import importlib
 mods = ["test_labeling", "test_metrics", "test_features", "test_datasets",
-        "test_regressions"]
+        "test_regressions", "test_dose", "test_crater", "test_dosecast"]
 passed = failed = 0
 for mn in mods:
     m = importlib.import_module(mn)

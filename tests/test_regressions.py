@@ -289,3 +289,14 @@ def test_subsample_keeps_every_positive():
     idx = subsample(mask, pos, 3)
     assert set(np.flatnonzero(pos)) <= set(idx)
     assert len(idx) < 400
+
+
+def test_despike_removes_single_point_glitch_only():
+    from oracle.ingest import despike
+    idx = pd.date_range("2025-10-06", periods=200, freq="5min", tz="UTC")
+    x = np.full(200, 1.0)
+    x[50] = 2.7e7                                  # 한 점 튐
+    x[120:160] = np.geomspace(1, 5000, 40)         # 진짜 상승
+    out = despike(pd.DataFrame({"p_gt10": x}, index=idx))["p_gt10"]
+    assert np.isnan(out.iloc[50])
+    assert out.iloc[120:160].notna().all() and out.iloc[159] == x[159]

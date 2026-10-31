@@ -165,7 +165,7 @@ if HAS_TORCH:
                epochs=20, batch_size=256, seed=0, device=None,
                Xva=None, yva=None, verbose=True, kind="tcn",
                patience_max=5, pos_weight="sqrt", ema_decay=0.0, cosine=False,
-               snapshot_epochs=()):
+               snapshot_epochs=(), loss="bce"):
         """y 는 (N,) 또는 (N, n_heads). horizon 여러 개를 한 번에 학습.
 
         pos_weight: "sqrt" 면 sqrt(음성/양성) (약 60배). "balanced" 는 약 3,400배라
@@ -173,6 +173,7 @@ if HAS_TORCH:
         ema_decay: 0 보다 크면 가중치 지수이동평균을 최종 가중치로 쓴다.
         Xva 가 없으면 조기 종료 없이 epochs 만큼 돈다.
         snapshot_epochs: 이 epoch 들의 가중치를 model.snapshots_ 에 남긴다 (개발 모드).
+        loss="mse" 면 회귀 (선량 예측). y 의 NaN 은 손실에서 뺀다.
         """
         torch.manual_seed(seed); np.random.seed(seed)
         dev = device or ("cuda" if torch.cuda.is_available() else "cpu")
@@ -181,14 +182,19 @@ if HAS_TORCH:
             model = make_model(kind, n_feat or X.shape[2], cfg, n_heads=Y.shape[1])
         model = model.to(dev)
 
-        pos = np.clip(Y.sum(axis=0).astype(float), 1.0, None)
+        pos = np.clip(np.nansum(Y, axis=0).astype(float), 1.0, None)
         ratio = (len(Y) - pos) / pos
         if pos_weight == "sqrt":
             ratio = np.sqrt(ratio)
         elif pos_weight in (None, "none"):
             ratio = np.ones_like(ratio)
-        w = torch.tensor(ratio, dtype=torch.float32, device=dev)
-        lossf = nn.BCEWithLogitsLoss(pos_weight=w)
+        if loss == "mse":
+            def lossf(p, t):
+                m = torch.isfinite(t)
+                return ((p - torch.nan_to_num(t)) ** 2 * m).sum() / m.sum().clamp(min=1)
+        else:
+            w = torch.tensor(ratio, dtype=torch.float32, device=dev)
+            lossf = nn.BCEWithLogitsLoss(pos_weight=w)
         opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
         steps_total = epochs * max(1, int(np.ceil(len(X) / batch_size)))
         sched = (torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=steps_total, eta_min=lr * 0.05)
@@ -256,13 +262,14 @@ if HAS_TORCH:
         return model.eval()
 
     @torch.no_grad()
-    def predict_nn(model, X, batch_size=2048) -> np.ndarray:
-        """(N, n_heads) 확률."""
+    def predict_nn(model, X, batch_size=2048, raw=False) -> np.ndarray:
+        """(N, n_heads) 확률. raw=True 면 출력 그대로 (회귀)."""
         dev = next(model.parameters()).device
         out = []
         for i in range(0, len(X), batch_size):
             xb = torch.from_numpy(X[i:i + batch_size]).to(dev)
-            out.append(torch.sigmoid(model(xb)).cpu().numpy())
+            o = model(xb)
+            out.append((o if raw else torch.sigmoid(o)).cpu().numpy())
         return np.concatenate(out) if out else np.empty((0, model.n_heads), np.float32)
 
     def count_params(model) -> int:
